@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached on install. Pages load from the
 // network when online (so updates arrive) and fall back to the cache offline.
-const CACHE = 'my-finances-v6';
+const CACHE = 'my-finances-v7';
 const ASSETS = [
   './',
   './index.html',
@@ -13,7 +13,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // Fetch fresh copies (not the browser's short-term cache) so a new version is complete.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((a) => new Request(a, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -28,7 +29,8 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
-    fetch(req)
+    // 'no-cache' asks GitHub whether the file changed, so updates show on the next open.
+    fetch(req, { cache: 'no-cache' })
       .then((resp) => {
         if (resp.ok) {
           const copy = resp.clone();

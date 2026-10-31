@@ -3,6 +3,7 @@
    All data lives in this browser's storage on this device. */
 
 const KEY = 'myfinances.v1';
+const APP_VERSION = '7';
 const COLORS = ['#1E5E52', '#2F6F9F', '#B5651D', '#6B5B95', '#8E3B2F', '#7A6A55', '#C9A04F', '#3F7F3A'];
 /* Layout colour themes: accent and its soft tint, for light and dark mode. All pass 4.5:1 with white text. */
 const THEMES = {
@@ -1647,6 +1648,8 @@ function sheetSettings() {
     <p class="note">Last backup: ${esc(S.settings.lastBackup ? stamp(S.settings.lastBackup) : 'never')}.</p>
     <span class="cap2">WHERE YOUR DATA IS</span>
     <p class="note">Only on this device, in this app’s private browser storage. Nothing is sent anywhere: no account, no server, no tracking. If you delete the app from your Home Screen, its data is deleted too, so export a backup to Files or iCloud Drive regularly.</p>
+    <span class="cap2">APP</span>
+    <div class="check"><span>Version ${APP_VERSION}<span class="d">Updates load automatically when you open the app online.</span></span><button class="mini" data-act="checkUpdate">Check for updates</button></div>
     <button class="btn danger wide" data-act="eraseAll">Erase all data</button>`;
 }
 function renderSheet() {
@@ -2175,6 +2178,17 @@ const ACT = {
     const blob = new Blob(['﻿' + buildCSV()], { type: 'text/csv' });
     if (await deliver(blob, `my-finances-${new Date().toISOString().slice(0, 10)}.csv`)) toast('CSV created');
   }),
+  checkUpdate: async () => {
+    // Clears only the app's offline file cache, never your data, then reloads the newest version.
+    toast('Checking for updates…');
+    try {
+      const regs = navigator.serviceWorker ? await navigator.serviceWorker.getRegistrations() : [];
+      await Promise.all(regs.map((r) => r.unregister()));
+      const keys = window.caches ? await caches.keys() : [];
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch (_) { /* reload anyway */ }
+    location.reload();
+  },
   importJSON: () => { const i = $('#importFile'); i.value = ''; i.click(); },
   eraseAll: () => {
     if (!confirm('Erase ALL data on this device? This cannot be undone after you close the app. Export a backup first if unsure.')) return;
@@ -2580,5 +2594,14 @@ load();
 lastSeenMonth = curM();
 render();
 if (loadWarning) setTimeout(() => toast(loadWarning), 300);
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => reg.update()).catch(() => {});
+  // When a new version takes over, reload once so it shows straight away (only when no editor is open).
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded || ui.sheet) return;
+    reloaded = true;
+    location.reload();
+  });
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
