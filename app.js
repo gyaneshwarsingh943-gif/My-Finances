@@ -3,7 +3,7 @@
    All data lives in this browser's storage on this device. */
 
 const KEY = 'myfinances.v1';
-const APP_VERSION = '7';
+const APP_VERSION = '8';
 const COLORS = ['#1E5E52', '#2F6F9F', '#B5651D', '#6B5B95', '#8E3B2F', '#7A6A55', '#C9A04F', '#3F7F3A'];
 /* Layout colour themes: accent and its soft tint, for light and dark mode. All pass 4.5:1 with white text. */
 const THEMES = {
@@ -87,7 +87,7 @@ function parseAmount(str) {
 /* ---------------- state ---------------- */
 let S = null;
 let undoStack = [];
-const ui = { tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false }, planShowEmpty: {}, justAdded: new Set() };
+const ui = { projOpen: false, tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false }, planShowEmpty: {}, justAdded: new Set() };
 
 function blankState() {
   const m = curM();
@@ -104,7 +104,8 @@ function blankState() {
     settings: {
       firstMonth: m, forecastMonths: 4, hiddenMonths: [], showPast: false, decimals: 0,
       rates: { INR: { perGBP: 111, at: null } }, under65: true, allowances: {}, carryLeft: false, lastBackup: null,
-      appearance: 'system', accent: 'green', checkIn: m, changes: 0
+      appearance: 'system', accent: 'green', checkIn: m, changes: 0,
+      proj: { rate: null, cats: null, line: true }
     },
     cats, catCells: {},
     savTotal: { f: 'SUM(' + cats.filter((c) => c.kind === 'held').map((c) => `{s:${c.id}}`).join(', ') + ')', at: now() },
@@ -134,6 +135,7 @@ function migrate(d) {
   // Existing data: start month check-ins from now, so nobody is asked about a month already under way.
   if (!/^\d{4}-\d{2}$/.test(d.settings.checkIn || '')) d.settings.checkIn = curM();
   if (typeof d.settings.changes !== 'number') d.settings.changes = 0;
+  if (!d.settings.proj || typeof d.settings.proj !== 'object') d.settings.proj = { rate: null, cats: null, line: true };
   d.cats.forEach((c) => { c.isaPrior = c.isaPrior || {}; if (c.ccy !== 'INR') c.ccy = 'GBP'; if (c.kind !== 'expected') c.kind = 'held'; });
   d.lines.forEach((l) => { l.entries = l.entries || {}; if (!['income', 'expense', 'saving'].includes(l.sec)) l.sec = 'expense'; });
   if (!d.savTotal || typeof d.savTotal.f !== 'string') d.savTotal = { f: b.savTotal.f.replace(/\{s:[^}]+\}(, )?/g, ''), at: now() };
@@ -378,6 +380,37 @@ function catGrowth(id, m) {
   const cell = (S.catCells[id] || {})[m];
   if (cell && (cell.f || cell.v != null)) return 0;
   return catNative(id, addM(m, -1)) * monthlyRate(c.growth);
+}
+/* "What if" growth projection on investments (Overview only; never changes the main forecast).
+   The yearly rate becomes the monthly rate that compounds to exactly that rate over 12 months.
+   Each month: last month's projected balance grows by one month, then that month's saving is added,
+   so every saving starts growing from the month after it goes in. */
+function projCats() {
+  const p = S.settings.proj || {};
+  if (Array.isArray(p.cats)) return p.cats.filter((id) => catById(id));
+  return S.cats.filter((c) => c.kind === 'held' && (c.isa === 'ss' || /stock|share|invest|fund/i.test(c.name))).map((c) => c.id);
+}
+const projRate = () => { const r = (S.settings.proj || {}).rate; return typeof r === 'number' && isFinite(r) ? r : null; };
+function projNative(id, m) {
+  return calc(`pj|${id}|${m}`, () => {
+    const cat = catById(id);
+    if (m <= curM() || projRate() == null) return catNative(id, m);
+    const cell = (S.catCells[id] || {})[m];
+    if (cell && (cell.f || cell.v != null)) return catNative(id, m);
+    const toNative = (g) => (cat.ccy === 'INR' ? g * rate() : g);
+    let v = projNative(id, addM(m, -1)) * (1 + monthlyRate(projRate()));
+    for (const ln of S.lines) if (ln.sec === 'saving' && ln.link === id) v += toNative(lineUsed(ln, m));
+    return v;
+  });
+}
+function projTotal(m) {
+  return calc(`PT|_|${m}`, () => {
+    const set = new Set(projCats());
+    return evaluate(S.savTotal.f || '0', m, (k, id, mm) => {
+      if (k === 's' && set.has(id)) { const c = catById(id); const v = projNative(id, mm); return c.ccy === 'INR' ? v / rate() : v; }
+      return getRef(k, id, mm);
+    });
+  });
 }
 function catGBP(id, m) { const c = catById(id); const v = catNative(id, m); return c.ccy === 'INR' ? v / rate() : v; }
 const savTotal = (m) => calc(`T|_|${m}`, () => evalIn(S.savTotal.f || '0', m));
@@ -710,6 +743,7 @@ function commitInline(el) {
   const n = parseAmount(el.value);
   if (n != null && isNaN(n)) { toast(`“${el.value}” isn’t a number`); el.value = d.orig; return false; }
   if (n != null && n < 0 && (d.inl === 'repay' || d.k === 'l')) { toast('Use a positive amount'); el.value = d.orig; return false; }
+  if (d.inl === 'projRate' && n != null && (n < -50 || n > 50)) { toast('Use a yearly return between −50% and 50%'); el.value = d.orig; return false; }
   const m = d.m;
   d.orig = el.value; // stops a second save when the field then loses focus
   if (d.inl === 'cell') {
@@ -728,6 +762,8 @@ function commitInline(el) {
       if (e.amt == null && !e.f && e.actual == null) delete ln.entries[m]; else ln.entries[m] = e;
       ln.at = now();
     }, d.inl === 'plan' && n == null ? 'Using the recurring amount' : null);
+  } else if (d.inl === 'projRate') {
+    mutate(() => { S.settings.proj = Object.assign({ cats: null, line: true }, S.settings.proj, { rate: n }); }, n == null ? 'Growth projection off' : null);
   } else if (d.inl === 'grow' || d.inl === 'gtarget') {
     const g = goalById(d.id);
     if (!g) return false;
@@ -766,12 +802,39 @@ function forecastList(fn) {
   if (!months.length) html = '<div class="fr"><span>No forecast months</span></div>';
   return { html, extra: months.length - 4 };
 }
+function projCard() {
+  const p = S.settings.proj || {};
+  const r = projRate();
+  const cats = projCats().map((id) => catById(id).name);
+  const months = visibleMonths().filter((m) => m > curM());
+  const rateField = `<span class="inl manual" style="width:96px"><input class="num" data-inl="projRate" data-id="proj" data-m="${curM()}" data-key="projRate" data-orig="${r == null ? '' : esc(String(r))}" value="${r == null ? '' : esc(String(r))}" placeholder="e.g. 8" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label="Yearly return in percent"><span class="cur" aria-hidden="true">%</span></span>`;
+  let body = '';
+  if (!cats.length) body = `<p class="note" style="margin:0">No investment category found. <button class="linkbtn" data-act="openProjCats">Choose which savings grow ›</button></p>`;
+  else if (r == null) body = `<p class="note" style="margin:0">What yearly return are you assuming for ${esc(cats.join(', '))}? Enter a %, e.g. 8.</p>`;
+  else if (!months.length) body = '<p class="note" style="margin:0">Add forecast months to see a projection.</p>';
+  else {
+    const rows = months.map((m) => { const a = safe(() => savTotal(m)), b = safe(() => projTotal(m)); const bad = a instanceof FErr || b instanceof FErr;
+      return `<div class="pjrow"><span>${esc(monthChip(m))}</span><span class="num">${bad ? '⚠' : esc(fmt(a))}</span><span class="num" style="font-weight:700">${bad ? '⚠' : esc(fmt(b))}</span><span class="num" style="color:var(--accent);font-weight:600">${bad ? '' : esc((b - a >= 0 ? '+' : '−') + fmt(Math.abs(b - a)).replace('−', ''))}</span></div>`; }).join('');
+    const lastM = months[months.length - 1];
+    const a = safe(() => savTotal(lastM)), b = safe(() => projTotal(lastM));
+    const sum = a instanceof FErr || b instanceof FErr ? '' : `At ${r}% a year, savings could reach <b>${esc(fmt(b))}</b> by ${esc(mLabel(lastM))}, which is ${esc(fmt(b - a))} more than without growth.`;
+    body = `<p class="note" style="margin:0;color:var(--ink)">${sum}</p>
+      ${ui.projOpen ? `<div class="pjtable"><div class="pjrow h"><span>MONTH</span><span>FORECAST</span><span>WITH GROWTH</span><span>GROWTH</span></div>${rows}</div>
+      <p class="note" style="margin:0">Growth applies to ${esc(cats.join(', '))} only. ${r}% a year compounds monthly (${(monthlyRate(r) * 100).toFixed(3)}% a month); each month’s saving starts growing the month after it goes in. Your main forecast doesn’t change. Returns aren’t guaranteed. <button class="linkbtn" style="min-height:32px" data-act="openProjCats">Change which savings grow ›</button></p>` : ''}
+      <button class="more" style="text-decoration:underline;min-height:36px;border:0;background:none;color:var(--accent);font-weight:600;padding:0;text-align:left" data-act="projToggle">${ui.projOpen ? 'Hide table' : 'Show month by month'}</button>`;
+  }
+  return `<section class="card pad" style="display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span style="display:flex;flex-direction:column;gap:2px"><span class="cap2">WITH INVESTMENT GROWTH</span><span class="small muted">Yearly return</span></span>${rateField}</div>
+    ${body}</section>`;
+}
 function trendChart() {
   const months = visibleMonths();
   if (months.length < 2) return '';
   const val = (fn, m) => { const v = safe(() => fn(m)); return typeof v === 'number' ? v : null; };
   const sv = months.map((m) => val(savTotal, m)), lv = months.map((m) => val(liabTotal, m));
-  const all = sv.concat(lv).filter((v) => v != null);
+  const showP = projRate() != null && projCats().length && (S.settings.proj || {}).line !== false;
+  const pv = projRate() != null && projCats().length ? months.map((m) => val(projTotal, m)) : [];
+  const all = sv.concat(lv).concat(showP ? pv : []).filter((v) => v != null);
   if (!all.length) return '';
   const max = Math.max(1, ...all) * 1.08, min = Math.min(0, ...all);
   const W = 320, H = 150, pl = 6, pr = 6, pt = 10, pb = 22;
@@ -787,9 +850,11 @@ function trendChart() {
     <span class="cap2">TREND</span>
     <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(desc)}">
       <line x1="${pl}" x2="${W - pr}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" class="ch-base"/>
+      ${showP ? `<polyline points="${pts(pv)}" class="ch-p"/>` : ''}
       <polyline points="${pts(sv)}" class="ch-s"/><polyline points="${pts(lv)}" class="ch-l"/>
       ${dots(sv, 'ch-sd')}${dots(lv, 'ch-ld')}${labels}</svg>
-    <div class="legend"><span><i style="background:var(--accent)"></i>Savings ${esc(fmt(first(sv)))} → ${esc(fmt(last(sv)))}</span><span><i style="background:var(--liab)"></i>Liabilities (dashed) ${esc(fmt(first(lv)))} → ${esc(fmt(last(lv)))}</span></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Savings ${esc(fmt(first(sv)))} → ${esc(fmt(last(sv)))}</span><span><i style="background:var(--liab)"></i>Liabilities (dashed) ${esc(fmt(first(lv)))} → ${esc(fmt(last(lv)))}</span>${showP ? `<span><i style="background:var(--accent-rule)"></i>With ${projRate()}% growth (dotted) → ${esc(fmt(last(pv)))}</span>` : ''}</div>
+    ${pv.length ? `<div class="check" style="min-height:40px"><span style="font-size:14px">Show growth line</span><button class="switch" role="switch" aria-checked="${showP ? 'true' : 'false'}" aria-label="Show growth line on the trend chart" data-act="projLine"></button></div>` : ''}
   </section>`;
 }
 function backupBanner() {
@@ -832,6 +897,7 @@ function screenOverview() {
       </section>
     </div>
     <p class="note" style="margin:-4px 0 0">Shown separately. Liabilities are never subtracted from savings. Forecasts follow your Plan.</p>
+    ${projCard()}
     ${trendChart()}
     ${exp.map((c) => { const r = safe(() => catNative(c.id, cm)); return `<button class="expected" data-act="tab" data-tab="savings"><span style="display:flex;flex-direction:column;gap:2px"><span class="tag" style="background:none;padding:0">EXPECTED · NOT COUNTED</span><span style="font-weight:600">${esc(c.name)}</span></span><span class="v num" style="border:0;background:none">${r instanceof FErr ? '⚠' : esc(fmt(r, c.ccy, catDp(c)))}</span></button>`; }).join('')}
     <div class="grid2">
@@ -1497,6 +1563,13 @@ function sheetLiab(sh) {
     <button class="btn primary wide" data-act="saveLiab">${isNew ? 'Add liability' : 'Save'}</button>
     ${!isNew ? '<button class="btn danger wide" data-act="deleteLiab">Delete liability</button>' : ''}`;
 }
+function sheetProjCats() {
+  const cur = projCats();
+  return `${phead('Overview', 'Which savings grow?')}
+    <p class="note">The growth projection applies your yearly return to these categories. Cash and expected income are usually left off.</p>
+    ${S.cats.filter((c) => c.kind === 'held').map((c) => sw('pc_' + c.id, fv('pc_' + c.id, cur.includes(c.id)), esc(c.name), c.ccy === 'INR' ? 'In ₹, converted to £ for totals' : '')).join('')}
+    <button class="btn primary wide" data-act="saveProjCats">Save</button>`;
+}
 function sheetCover(sh) {
   const m = sh.m;
   const ps = safe(() => planSummary(m));
@@ -1657,7 +1730,7 @@ function renderSheet() {
   const sh = ui.sheet;
   if (!sh) { host.innerHTML = ''; document.body.style.overflow = ''; return; }
   const scrollTop = $('#sheet .panel') ? $('#sheet .panel').scrollTop : 0;
-  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow, checkin: sheetCheckIn, cover: sheetCover };
+  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow, checkin: sheetCheckIn, cover: sheetCover, projcats: sheetProjCats };
   resetCalc();
   host.innerHTML = `<div class="shade" data-act="shade"><div class="panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">${builders[sh.type](sh)}</div></div>`;
   document.body.style.overflow = 'hidden';
@@ -1934,6 +2007,17 @@ const ACT = {
       if (!confirm(`Remove “${ln.name}”? It starts in ${mLabel(startsAt)}, so it will be removed completely.` + (used.length ? `\n\nThese formulas use it and will show an error until fixed:\n• ${used.join('\n• ')}` : '') + '\n\nYou can undo this.')) return;
       mutate(() => { S.lines = S.lines.filter((x) => x.id !== ln.id); }, 'Row removed');
     }
+    closeSheet();
+  },
+
+  /* growth projection */
+  projToggle: () => { ui.projOpen = !ui.projOpen; render(); },
+  projLine: () => { mutate(() => { S.settings.proj.line = S.settings.proj.line === false; }); render(); },
+  openProjCats: () => openSheet({ type: 'projcats' }),
+  saveProjCats: () => {
+    collect();
+    const ids = S.cats.filter((c) => c.kind === 'held' && fv('pc_' + c.id, projCats().includes(c.id))).map((c) => c.id);
+    mutate(() => { S.settings.proj.cats = ids; }, 'Saved');
     closeSheet();
   },
 
@@ -2487,6 +2571,17 @@ function buildWorkbookModel() {
     gr++;
   });
   sheets.push(gs);
+  if (projRate() != null && projCats().length) {
+    const pjs = { name: 'Growth projection', rows: {}, widths: [16, 18, 18, 18] };
+    put(pjs, 1, 1, { s: `At ${projRate()}% a year on ${projCats().map((id) => catById(id).name).join(', ')}`, b: true });
+    put(pjs, 2, 1, { s: 'Month', b: true }); put(pjs, 2, 2, { s: 'Forecast', b: true }); put(pjs, 2, 3, { s: 'With growth', b: true }); put(pjs, 2, 4, { s: 'Growth', b: true });
+    months.filter((m) => m > curM()).forEach((m, i) => {
+      const a = safe(() => savTotal(m)), b = safe(() => projTotal(m));
+      put(pjs, 3 + i, 1, { s: mLabel(m) });
+      if (!(a instanceof FErr) && !(b instanceof FErr)) { put(pjs, 3 + i, 2, { n: a }); put(pjs, 3 + i, 3, { n: b }); put(pjs, 3 + i, 4, { n: b - a, f: `C${3 + i}-B${3 + i}` }); }
+    });
+    sheets.push(pjs);
+  }
   sheets.unshift(setS);
   return sheets;
 }

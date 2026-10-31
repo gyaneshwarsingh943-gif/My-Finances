@@ -261,6 +261,30 @@
     ok('no growth on the typed current month', eq(catNative(inv.id, cm), 10000));
     ok('growth does not use ISA allowance', eq(isaYear(taxYear(m1)).rows.find((x) => x.m === m1).add, 100));
 
+    /* Growth projection on investments (Overview) */
+    fresh();
+    const pS = S.cats[0], pC = S.cats[1];
+    S.catCells[pS.id] = { [cm]: { v: 20000 } }; S.catCells[pC.id] = { [cm]: { v: 5000 } };
+    S.lines.find((l) => l.name === 'Stocks & Shares ISA').entries[m1] = { amt: 500 };
+    S.lines.find((l) => l.name === 'Cash ISA').entries[m1] = { amt: 200 };
+    S.settings.proj = { rate: 8, cats: null, line: true };
+    resetCalc();
+    const i8 = Math.pow(1.08, 1 / 12) - 1;
+    const fv = (P, C, n) => P * Math.pow(1 + i8, n) + C * (Math.pow(1 + i8, n) - 1) / i8;
+    ok('projection picks Stocks & Shares by default', projCats().length === 1 && projCats()[0] === pS.id);
+    ok('matches the standard future-value formula (1 month)', eq(projNative(pS.id, m1), fv(20000, 500, 1)));
+    ok('matches the standard future-value formula (4 months)', eq(projNative(pS.id, m4), fv(20000, 500, 4)));
+    ok('8% a year is exactly 8% after 12 months', eq(Math.pow(1 + i8, 12), 1.08));
+    ok('cash is not grown', eq(projTotal(m4), fv(20000, 500, 4) + 5000 + 4 * 200 + 450000 * 0 + catGBP(S.cats[2].id, m4)));
+    ok('main forecast unchanged', eq(catNative(pS.id, m4), 20000 + 4 * 500));
+    ok('no growth before or in the current month', eq(projNative(pS.id, cm), 20000) && eq(projTotal(cm), savTotal(cm)));
+    S.settings.proj.rate = 0; resetCalc();
+    ok('0% equals the forecast', eq(projTotal(m4), savTotal(m4)));
+    S.settings.proj.rate = null; resetCalc();
+    ok('no rate means no projection', eq(projTotal(m3), savTotal(m3)));
+    S.settings.proj.rate = 8; S.catCells[pS.id][m2] = { v: 30000 }; resetCalc();
+    ok('a typed future balance resets the projection', eq(projNative(pS.id, m2), 30000) && eq(projNative(pS.id, m3), 30000 * (1 + i8) + 500));
+
     /* Two references side by side are added */
     ok('adjacent references summed', toInternal('[Total savings][Total liabilities]') === '{T:_} + {L:_}' && toInternal('[Total savings] [Total liabilities]') === '{T:_} + {L:_}');
     ok('adjacent numbers still an error', /missing between/.test(errOf('2 3')));

@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached on install. Pages load from the
 // network when online (so updates arrive) and fall back to the cache offline.
-const CACHE = 'my-finances-v7';
+const CACHE = 'my-finances-v8';
 const ASSETS = [
   './',
   './index.html',
