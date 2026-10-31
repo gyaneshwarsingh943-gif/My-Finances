@@ -38,6 +38,7 @@ const now = () => Date.now();
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pad = (n) => String(n).padStart(2, '0');
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const cleanNote = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 300);
 const cleanName = (s) => String(s || '').replace(/[\[\]{}@]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
 
 /* ---------------- months ---------------- */
@@ -85,7 +86,7 @@ function parseAmount(str) {
 /* ---------------- state ---------------- */
 let S = null;
 let undoStack = [];
-const ui = { tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false } };
+const ui = { tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false }, planShowEmpty: {}, justAdded: new Set() };
 
 function blankState() {
   const m = curM();
@@ -102,7 +103,7 @@ function blankState() {
     settings: {
       firstMonth: m, forecastMonths: 4, hiddenMonths: [], showPast: false, decimals: 0,
       rates: { INR: { perGBP: 111, at: null } }, under65: true, allowances: {}, carryLeft: false, lastBackup: null,
-      appearance: 'system', accent: 'green'
+      appearance: 'system', accent: 'green', checkIn: m, changes: 0
     },
     cats, catCells: {},
     savTotal: { f: 'SUM(' + cats.filter((c) => c.kind === 'held').map((c) => `{s:${c.id}}`).join(', ') + ')', at: now() },
@@ -113,7 +114,7 @@ function blankState() {
       line('expense', 'Transport'), line('expense', 'Other spending'),
       line('saving', 'Stocks & Shares ISA', cats[0].id), line('saving', 'Cash ISA', cats[1].id)
     ],
-    repay: {}, isaOv: {}, goals: []
+    repay: {}, isaOv: {}, goals: [], borrow: {}
   };
 }
 
@@ -128,7 +129,10 @@ function migrate(d) {
   if (!/^\d{4}-\d{2}$/.test(d.settings.firstMonth || '')) d.settings.firstMonth = curM();
   ['cats', 'liabs', 'lines', 'goals'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
   d.goals.forEach((g) => { if (!Array.isArray(g.rows)) g.rows = []; if (g.target && typeof g.target !== 'object') g.target = null; });
-  ['catCells', 'liabCells', 'repay', 'isaOv'].forEach((k) => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
+  ['catCells', 'liabCells', 'repay', 'isaOv', 'borrow'].forEach((k) => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
+  // Existing data: start month check-ins from now, so nobody is asked about a month already under way.
+  if (!/^\d{4}-\d{2}$/.test(d.settings.checkIn || '')) d.settings.checkIn = curM();
+  if (typeof d.settings.changes !== 'number') d.settings.changes = 0;
   d.cats.forEach((c) => { c.isaPrior = c.isaPrior || {}; if (c.ccy !== 'INR') c.ccy = 'GBP'; if (c.kind !== 'expected') c.kind = 'held'; });
   d.lines.forEach((l) => { l.entries = l.entries || {}; if (!['income', 'expense', 'saving'].includes(l.sec)) l.sec = 'expense'; });
   if (!d.savTotal || typeof d.savTotal.f !== 'string') d.savTotal = { f: b.savTotal.f.replace(/\{s:[^}]+\}(, )?/g, ''), at: now() };
@@ -161,6 +165,7 @@ function mutate(fn, msg) {
   undoStack.push(JSON.stringify(S));
   if (undoStack.length > 80) undoStack.shift();
   fn();
+  S.settings.changes = (S.settings.changes || 0) + 1;
   S.updatedAt = now();
   save();
   if (msg) toast(msg);
@@ -359,9 +364,19 @@ function catNative(id, m) {
     if (cell && cell.v != null) return cell.v;
     if (m === firstM()) return 0;
     let v = catNative(id, addM(m, -1));
+    v += catGrowth(id, m);
     for (const ln of S.lines) if (ln.sec === 'saving' && ln.link === id) v += toNative(lineUsed(ln, m));
     return v;
   });
+}
+// Expected investment growth: an annual % turned into a monthly rate on last month's balance.
+const monthlyRate = (pct) => Math.pow(1 + (Number(pct) || 0) / 100, 1 / 12) - 1;
+function catGrowth(id, m) {
+  const c = catById(id);
+  if (!c || !c.growth || m <= firstM()) return 0;
+  const cell = (S.catCells[id] || {})[m];
+  if (cell && (cell.f || cell.v != null)) return 0;
+  return catNative(id, addM(m, -1)) * monthlyRate(c.growth);
 }
 function catGBP(id, m) { const c = catById(id); const v = catNative(id, m); return c.ccy === 'INR' ? v / rate() : v; }
 const savTotal = (m) => calc(`T|_|${m}`, () => evalIn(S.savTotal.f || '0', m));
@@ -374,7 +389,7 @@ function liabVal(id, m) {
     if (cell && cell.f) return evalIn(cell.f, m);
     if (cell && cell.v != null) return cell.v;
     if (m === firstM()) return 0;
-    return Math.max(0, liabVal(id, addM(m, -1)) - repayUsed(id, m));
+    return Math.max(0, liabVal(id, addM(m, -1)) + borrowAmt(id, m) - repayUsed(id, m));
   });
 }
 const liabTotal = (m) => calc(`L|_|${m}`, () => evalIn(S.liabTotal.f || '0', m));
@@ -389,9 +404,11 @@ function findEntry(entries, m) {
   }
   return null;
 }
+// A plan row exists from its start month (when it was added) until its end month (when it was removed).
+const lineActive = (ln, m) => (!ln.start || m >= ln.start) && (!ln.end || m < ln.end);
 function linePlanned(ln, m) {
   return calc(`p|${ln.id}|${m}`, () => {
-    if (m < firstM()) return 0;
+    if (m < firstM() || !lineActive(ln, m)) return 0;
     const r = findEntry(ln.entries, m);
     if (!r) return 0;
     return r.e.f ? evalIn(r.e.f, m) : r.e.amt;
@@ -399,6 +416,7 @@ function linePlanned(ln, m) {
 }
 function lineUsed(ln, m) {
   return calc(`pu|${ln.id}|${m}`, () => {
+    if (!lineActive(ln, m)) return 0;
     const e = (ln.entries || {})[m];
     return e && e.actual != null ? e.actual : linePlanned(ln, m);
   });
@@ -410,6 +428,11 @@ function lineClosing(ln, m) {
 }
 
 /* Repayments: every liability appears in the plan; switch it on or off per month. */
+// New borrowing on a liability in a month (e.g. spending on a card). Raises the balance and funds the plan.
+function borrowAmt(id, m) {
+  const e = (S.borrow[id] || {})[m];
+  return e && Number(e.amt) > 0 ? Number(e.amt) : 0;
+}
 function repayOn(id, m) {
   const e = (S.repay[id] || {})[m];
   if (e && e.on != null) return e.on;
@@ -427,7 +450,7 @@ function repayPlanned(id, m) {
     if (m < firstM() || !repayOn(id, m)) return 0;
     const amt = Math.max(0, repayAmountRaw(id, m));
     if (m === firstM()) return amt;
-    return Math.min(amt, Math.max(0, liabVal(id, addM(m, -1))));
+    return Math.min(amt, Math.max(0, liabVal(id, addM(m, -1)) + borrowAmt(id, m)));
   });
 }
 function repayUsed(id, m) {
@@ -444,9 +467,10 @@ function planSummary(m) {
       r[ln.sec] += lineUsed(ln, m);
       r['p' + ln.sec[0].toUpperCase() + ln.sec.slice(1)] += linePlanned(ln, m);
     }
-    for (const l of S.liabs) { r.repay += repayUsed(l.id, m); r.pRepay += repayPlanned(l.id, m); }
+    r.borrow = 0;
+    for (const l of S.liabs) { r.repay += repayUsed(l.id, m); r.pRepay += repayPlanned(l.id, m); r.borrow += borrowAmt(l.id, m); }
     if (S.settings.carryLeft && m > firstM()) r.bf = Math.max(0, planSummary(addM(m, -1)).left);
-    r.left = r.income + r.bf - r.expense - r.saving - r.repay;
+    r.left = r.income + r.bf + r.borrow - r.expense - r.saving - r.repay;
     return r;
   });
 }
@@ -574,6 +598,8 @@ function toInternal(text) {
     return '{' + r.kind + ':' + r.id + (atId ? '@' + atId : '') + '}';
   });
   if (/[\[\]]/.test(out)) throw new FErr('Check the square brackets around references');
+  // Two references side by side are added together.
+  return out.replace(/\}\s*(?=\{)/g, '} + ').replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
   return out.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
 }
 function usesRef(f, kind, id) { return typeof f === 'string' && new RegExp(`\\{${kind}:${id}(@[^}]*)?\\}`).test(f); }
@@ -636,7 +662,7 @@ function header(title) {
   return `<header class="top"><div><div class="date">${esc(d)}</div><h1>${esc(title)}</h1></div>
     <div class="actions"><button class="iconbtn" data-act="undo" aria-label="Undo last change" ${undoStack.length ? '' : 'disabled'}>${svg('undo')}</button>
     <button class="iconbtn" data-act="openSettings" aria-label="Settings, backup and export">${svg('gear')}</button></div></header>
-    <div class="stamp">${S.updatedAt ? 'Last change: ' + esc(stamp(S.updatedAt)) : 'No changes yet'}</div>`;
+    <div class="stamp">${S.updatedAt ? 'Last change: ' + esc(stamp(S.updatedAt)) : 'No changes yet'}</div>${backupBanner()}`;
 }
 function monthChip(m) { return m === curM() ? 'Now' : mShort(m) + (mParts(m)[0] !== mParts(curM())[0] ? ` ’${String(mParts(m)[0]).slice(2)}` : ''); }
 function chips() {
@@ -720,6 +746,39 @@ function forecastList(fn) {
   if (!months.length) html = '<div class="fr"><span>No forecast months</span></div>';
   return { html, extra: months.length - 4 };
 }
+function trendChart() {
+  const months = visibleMonths();
+  if (months.length < 2) return '';
+  const val = (fn, m) => { const v = safe(() => fn(m)); return typeof v === 'number' ? v : null; };
+  const sv = months.map((m) => val(savTotal, m)), lv = months.map((m) => val(liabTotal, m));
+  const all = sv.concat(lv).filter((v) => v != null);
+  if (!all.length) return '';
+  const max = Math.max(1, ...all) * 1.08, min = Math.min(0, ...all);
+  const W = 320, H = 150, pl = 6, pr = 6, pt = 10, pb = 22;
+  const x = (i) => pl + ((W - pl - pr) * i) / (months.length - 1);
+  const y = (v) => pt + (H - pt - pb) * (1 - (v - min) / (max - min || 1));
+  const pts = (arr) => arr.map((v, i) => (v == null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean).join(' ');
+  const dots = (arr, cls) => arr.map((v, i) => (v == null ? '' : `<circle class="${cls}" cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3"/>`)).join('');
+  const step = Math.ceil(months.length / 6);
+  const labels = months.map((m, i) => (i % step === 0 || i === months.length - 1 ? `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === months.length - 1 ? 'end' : 'middle'}" class="ch-t">${esc(m === curM() ? 'Now' : mShort(m))}</text>` : '')).join('');
+  const first = (a) => a.find((v) => v != null), last = (a) => [...a].reverse().find((v) => v != null);
+  const desc = `Savings ${fmt(first(sv))} now to ${fmt(last(sv))} in ${mLabel(months[months.length - 1])}; liabilities ${fmt(first(lv))} to ${fmt(last(lv))}.`;
+  return `<section class="card pad" style="display:flex;flex-direction:column;gap:8px">
+    <span class="cap2">TREND</span>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(desc)}">
+      <line x1="${pl}" x2="${W - pr}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" class="ch-base"/>
+      <polyline points="${pts(sv)}" class="ch-s"/><polyline points="${pts(lv)}" class="ch-l"/>
+      ${dots(sv, 'ch-sd')}${dots(lv, 'ch-ld')}${labels}</svg>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Savings ${esc(fmt(first(sv)))} → ${esc(fmt(last(sv)))}</span><span><i style="background:var(--liab)"></i>Liabilities (dashed) ${esc(fmt(first(lv)))} → ${esc(fmt(last(lv)))}</span></div>
+  </section>`;
+}
+function backupBanner() {
+  const n = S.settings.changes || 0;
+  const old = S.settings.lastBackup && now() - S.settings.lastBackup > 30 * 864e5;
+  if (n < 10 && !(n > 0 && (old || !S.settings.lastBackup) && S.updatedAt && now() - S.createdAt > 7 * 864e5)) return '';
+  return `<div class="banner"><span>${n} change${n === 1 ? '' : 's'} since your ${S.settings.lastBackup ? 'last backup' : 'start (no backup yet)'}. Your data is only on this device.</span><button data-act="exportJSON">Back up</button></div>`;
+}
+const needCheckIn = () => curM() > (S.settings.checkIn || curM()) && curM() > firstM();
 function screenOverview() {
   const cm = curM();
   const sav = safe(() => savTotal(cm)), lia = safe(() => liabTotal(cm));
@@ -733,11 +792,10 @@ function screenOverview() {
     const row = isa.rows.find((r) => r.m === cm);
     isaLeft = fmt(isa.a.overall - (row ? row.used : isa.used));
   }
-  const needBackup = S.updatedAt && (!S.settings.lastBackup || now() - S.settings.lastBackup > 30 * 864e5);
   const noData = !Object.keys(S.catCells).some((k) => Object.keys(S.catCells[k]).length);
   return `<main class="screen">${header('Overview')}
     ${noData ? `<div class="banner"><span>Start by entering your current balances.</span><button data-act="tab" data-tab="savings">Savings</button></div>` : ''}
-    ${needBackup ? `<div class="banner"><span>${S.settings.lastBackup ? 'Last backup over 30 days ago.' : 'No backup yet.'} Your data is only on this device.</span><button data-act="exportJSON">Back up</button></div>` : ''}
+    ${needCheckIn() ? `<div class="banner" style="background:var(--calc);border-color:var(--calc);color:var(--calc-ink)"><span><b>New month.</b> Check your ${esc(mLong(curM()))} balances so forecasts stay accurate.</span><button data-act="openCheckIn">Check</button></div>` : ''}
     <div class="grid2">
       <section class="ov sav" aria-label="Savings">
         <span class="sub">Savings · now</span>
@@ -753,6 +811,7 @@ function screenOverview() {
       </section>
     </div>
     <p class="note" style="margin:-4px 0 0">Shown separately. Liabilities are never subtracted from savings. Forecasts follow your Plan.</p>
+    ${trendChart()}
     ${exp.map((c) => { const r = safe(() => catNative(c.id, cm)); return `<button class="expected" data-act="tab" data-tab="savings"><span style="display:flex;flex-direction:column;gap:2px"><span class="tag" style="background:none;padding:0">EXPECTED · NOT COUNTED</span><span style="font-weight:600">${esc(c.name)}</span></span><span class="v num" style="border:0;background:none">${r instanceof FErr ? '⚠' : esc(fmt(r, c.ccy, catDp(c)))}</span></button>`; }).join('')}
     <div class="grid2">
       <button class="tile" data-act="tab" data-tab="plan"><span class="sub">${esc(mLong(cm).split(' ')[0])} plan</span><span class="val num">${ps instanceof FErr ? '⚠' : esc(fmt(ps.left))}</span><span class="sub small">left to allocate</span></button>
@@ -775,7 +834,8 @@ function catSource(c, m) {
   if (cell && cell.v != null) return 'Typed · ' + stamp(cell.at).split(',')[0];
   if (m <= firstM()) return 'Not entered yet · tap to enter';
   const linked = S.lines.filter((l) => l.sec === 'saving' && l.link === c.id);
-  return linked.length ? 'ƒ Previous month + Plan' : 'ƒ Same as previous month';
+  const g = c.growth ? ` + ${c.growth}%/yr growth` : '';
+  return linked.length ? `ƒ Previous month${g} + Plan` : `ƒ Previous month${g}`;
 }
 function screenSavings() {
   const m = ui.m;
@@ -805,7 +865,7 @@ function screenSavings() {
         label: `${c.name}, ${mLong(m)}, amount in ${c.ccy === 'INR' ? 'rupees' : 'pounds'}` });
     return `<div class="row ${c.hidden ? 'hiddenrow' : ''}">
       <span class="dot" style="background:${esc(c.color)}"></span>
-      <span class="main"><span class="name ${c.bold ? 'b' : ''}">${esc(c.name)}</span><span class="meta">${isErr ? esc(r.message) : esc((c.kind === 'expected' ? 'Expected · not in total · ' : '') + catSource(c, m))}</span>${gbp ? `<span class="meta num">${esc(gbp)}</span>` : ''}</span>
+      <span class="main"><span class="name ${c.bold ? 'b' : ''}">${esc(c.name)}</span><span class="meta">${isErr ? esc(r.message) : esc((c.kind === 'expected' ? 'Expected · not in total · ' : '') + catSource(c, m))}</span>${gbp ? `<span class="meta num">${esc(gbp)}</span>` : ''}${c.note ? `<span class="meta rownote">${esc(c.note)}</span>` : ''}</span>
       ${control}${moreBtn('editCell', { k: 's', id: c.id, m }, c.name)}</div>`;
   }).join('');
   return `<main class="screen">${header('Savings')}
@@ -831,6 +891,8 @@ function liabSource(l, m) {
   if (cell && cell.v != null) return 'Typed · ' + stamp(cell.at).split(',')[0];
   if (m <= firstM()) return 'Not entered yet · tap to enter';
   const prev = safe(() => liabVal(l.id, addM(m, -1)));
+  const b = borrowAmt(l.id, m);
+  if (b) { const r0 = safe(() => repayUsed(l.id, m)); return `ƒ Previous + borrowed ${fmt(b)}${typeof r0 === 'number' && r0 > 0 ? ' − repaid ' + fmt(r0) : ''}`; }
   if (prev === 0) return 'Paid off';
   const r = safe(() => repayUsed(l.id, m));
   if (typeof r === 'number' && r > 0) return `ƒ Previous − repayment ${fmt(r)}`;
@@ -862,7 +924,7 @@ function screenLiab() {
         cls: typed || blankFirst ? 'manual' : 'calc', label: `${l.name}, ${mLong(m)}, balance in pounds` });
     return `<div class="row ${l.hidden ? 'hiddenrow' : ''}">
       <span class="dot" style="background:${esc(l.color)}"></span>
-      <span class="main"><span class="name ${l.bold ? 'b' : ''}">${esc(l.name)}</span><span class="meta">${esc(isErr ? r.message : liabSource(l, m))}</span></span>
+      <span class="main"><span class="name ${l.bold ? 'b' : ''}">${esc(l.name)}</span><span class="meta">${esc(isErr ? r.message : liabSource(l, m))}</span>${l.note ? `<span class="meta rownote">${esc(l.note)}</span>` : ''}</span>
       ${control}${moreBtn('editCell', { k: 'l', id: l.id, m }, l.name)}</div>`;
   }).join('');
   const rep = safe(() => S.liabs.reduce((t, l) => t + repayUsed(l.id, m), 0));
@@ -871,12 +933,12 @@ function screenLiab() {
       ${hiddenCount && !editing ? `<button class="mini" data-act="toggleHidden" data-k="l">${ui.showHidden.l ? 'Hide hidden' : `Show ${hiddenCount} hidden`}</button>` : ''}
       <button class="mini" data-act="toggleEdit" data-k="l" aria-pressed="${editing}">${editing ? 'Done' : 'Edit list'}</button></div>
     ${chips()}
-    <button class="hero liab" data-act="editTotal" data-k="l">
-      <span class="lab">Total liabilities · ${esc(m === curM() ? 'now' : mLong(m))}</span>
+    <div class="hero liab compact">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span class="lab">Total liabilities · ${esc(m === curM() ? 'now' : mLong(m))}</span>
+        <button class="linkbtn" style="min-height:36px;font-size:13px" data-act="editTotal" data-k="l" aria-label="Edit total liabilities formula">ƒ Formula</button></div>
       <span class="big num">${tot instanceof FErr ? '⚠ Error' : esc(fmt(tot))}</span>
-      <span class="fx">ƒ ${esc(toDisplay(S.liabTotal.f))}</span>
-      ${tot instanceof FErr ? `<span class="fx" style="color:var(--err-ink)">${esc(tot.message)}</span>` : ''}
-      <span class="edit">Edit total formula · kept separate from savings</span></button>
+      ${tot instanceof FErr ? `<span class="fx" style="color:var(--err-ink)">${esc(tot.message)}</span>` : ''}</div>
     <div class="card list">${rows || '<div class="row"><span class="main muted">No liabilities. Add one if you have any.</span></div>'}</div>
     <button class="addbtn" data-act="newLiab">+ Add liability</button>
     ${S.liabs.length ? `<button class="card pad" data-act="tab" data-tab="plan" style="text-align:left;display:flex;justify-content:space-between;gap:12px;align-items:center;color:var(--ink)">
@@ -902,9 +964,18 @@ function screenPlan() {
     ['saving', 'Savings allocations', 'Transfers to your own accounts. Not spending, and counted once'],
   ];
   const secHTML = secs.map(([k, title, note]) => {
-    const lines = S.lines.filter((l) => l.sec === k);
+    const lines = S.lines.filter((l) => l.sec === k && lineActive(l, m));
     const tot = ps instanceof FErr ? '⚠' : fmt(ps[k]);
-    const rows = lines.map((ln) => {
+    const isEmpty = (ln) => {
+      if (ui.justAdded.has(ln.id)) return false;
+      const f = findEntry(ln.entries, m);
+      if (f && f.e.f) return false;
+      const u = safe(() => lineUsed(ln, m));
+      return typeof u === 'number' && Math.abs(u) < 0.005;
+    };
+    const shown = ui.planShowEmpty[k] ? lines : lines.filter((ln) => !isEmpty(ln));
+    const hiddenN = lines.length - shown.length;
+    const rows = shown.map((ln) => {
       const pl = safe(() => linePlanned(ln, m));
       const e = ln.entries[m] || {};
       const own = e.f || e.amt != null;
@@ -917,28 +988,37 @@ function screenPlan() {
         ? `<button class="v ${pl instanceof FErr ? 'err' : 'calc'}" data-act="editLine" data-id="${ln.id}" data-m="${m}" aria-label="${esc(ln.name)} planned: formula. Open to edit">${esc(pl instanceof FErr ? '⚠ Error' : 'ƒ ' + fmt(pl))}</button>`
         : inlineInput({ kind: 'plan', id: ln.id, m, ccy: 'GBP', value: own ? numStr(e.amt) : found ? numStr(pl) : '', cls: own || !found ? 'manual' : 'calc', label: `${ln.name}, ${mLong(m)}, planned amount` });
       const actNote = e.actual != null ? `Actual ${fmt(e.actual)} used instead (set in ⋯)` : '';
-      const meta = [sub, actNote].filter(Boolean).join(' · ');
+      const meta = [sub, actNote].filter(Boolean).join(' · ') + (ln.note ? `${sub || actNote ? ' · ' : ''}${ln.note}` : '');
       return `<div class="row prow1">
         <span class="main"><span class="pname" style="font-weight:${ln.bold ? 800 : 600}">${esc(ln.name)}</span>${lineTag(ln, m)}${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</span>
         ${planCtl}${moreBtn('editLine', { id: ln.id, m }, ln.name)}</div>`;
     }).join('');
     const bf = k === 'income' && ps && !(ps instanceof FErr) && ps.bf ? `<div class="prow2"><div class="ptop"><span class="pname">Brought forward from ${esc(mShort(addM(m, -1)))}</span><span class="tag carry">Carry forward</span><span class="num" style="margin-left:auto;font-weight:600">${esc(fmt(ps.bf))}</span></div></div>` : '';
+    const moreToggle = hiddenN > 0 || ui.planShowEmpty[k]
+      ? (lines.some(isEmpty) ? `<button class="inlineadd muted" style="color:var(--muted)" data-act="planEmpty" data-sec="${k}">${ui.planShowEmpty[k] ? 'Hide empty rows' : `Show ${hiddenN} empty row${hiddenN > 1 ? 's' : ''}`}</button>` : '')
+      : '';
     return `<section class="card sec"><div class="head"><div class="t"><h2>${title}</h2><span class="num" style="font-weight:700">${esc(tot)}</span></div><span class="small muted">${note}</span></div>
-      ${bf}${rows}<button class="inlineadd" data-act="newLine" data-sec="${k}">+ Add row</button></section>`;
+      ${bf}${rows}${moreToggle}<button class="inlineadd" data-act="newLine" data-sec="${k}">+ Add row</button></section>`;
   }).join('');
 
-  const repRows = S.liabs.filter((l) => !l.hidden).map((l) => {
+  const repAll = S.liabs.filter((l) => !l.hidden);
+  const repEmpty = (l) => { const u = safe(() => repayUsed(l.id, m)); return typeof u === 'number' && Math.abs(u) < 0.005 && !borrowAmt(l.id, m); };
+  const repShown = ui.planShowEmpty.repay ? repAll : repAll.filter((l) => !repEmpty(l));
+  const repHidden = repAll.length - repShown.length;
+  const repRows = repShown.map((l) => {
     const on = repayOn(l.id, m);
     const prev = m > firstM() ? safe(() => liabVal(l.id, addM(m, -1))) : null;
     const used = safe(() => repayUsed(l.id, m));
     const raw = safe(() => repayAmountRaw(l.id, m));
     const e = (S.repay[l.id] || {})[m];
-    const paidOff = prev === 0;
+    const borrowed = borrowAmt(l.id, m);
+    const paidOff = prev === 0 && !borrowed;
     let sub;
     if (paidOff) sub = 'Already paid off';
     else if (e && e.actual != null) sub = `Actual paid ${fmt(e.actual)} (used instead of plan)`;
     else if (on) { const after = safe(() => liabVal(l.id, m)); sub = m > firstM() ? `Paying · balance after ${after instanceof FErr ? '⚠' : fmt(after)}` : 'Paying this month'; }
     else sub = `Not paying in ${mShort(m)}`;
+    if (borrowed) sub = `Borrowed ${fmt(borrowed)} · ` + sub;
     const ownAmt = e && e.amt != null && !e.f;
     const isF = (e && e.f) || ((findEntry(S.repay[l.id], m) || { e: {} }).e.f);
     let ctl;
@@ -956,17 +1036,26 @@ function screenPlan() {
   return `<main class="screen">${header('Plan')}${chips()}
     ${ps instanceof FErr ? `<div class="box bad">${esc(ps.message)}</div>` : ''}
     <div class="sum3">
-      <div><span class="k">In</span><span class="n num">${ps instanceof FErr ? '⚠' : esc(fmt(ps.income + ps.bf))}</span></div>
+      <div><span class="k">In${!(ps instanceof FErr) && ps.borrow ? ' (incl. borrowing)' : ''}</span><span class="n num">${ps instanceof FErr ? '⚠' : esc(fmt(ps.income + ps.bf + ps.borrow))}</span></div>
       <div><span class="k">Allocated</span><span class="n num">${ps instanceof FErr ? '⚠' : esc(fmt(ps.expense + ps.saving + ps.repay))}</span></div>
       <div class="${leftCls}"><span class="k" style="color:inherit">${left != null && left < -0.005 ? 'Over by' : 'Left'}</span><span class="n num">${left == null ? '⚠' : esc(fmt(Math.abs(left) < 0.005 ? 0 : Math.abs(left)))}</span></div>
     </div>
     ${secHTML}
     <section class="card sec"><div class="head"><div class="t"><h2>Liability repayments</h2><span class="num" style="font-weight:700">${ps instanceof FErr ? '⚠' : esc(fmt(ps.repay))}</span></div>
-      <span class="small muted">Every liability is listed automatically. Switch on to pay it this month; forecasts update.</span></div>
-      ${repRows || '<div class="rrow"><span class="muted small">No liabilities yet. Add them in the Liabilities tab.</span></div>'}</section>
+      <span class="small muted">Every liability is listed automatically. Switch on to pay it this month. Tap ⋯ to record new borrowing (e.g. spending on a card): it raises the balance and counts as money in.</span>
+      ${!(ps instanceof FErr) && ps.borrow ? `<span class="small" style="color:var(--liab);font-weight:600">Borrowed this month: ${esc(fmt(ps.borrow))}</span>` : ''}</div>
+      ${repRows || (repAll.length ? '' : '<div class="rrow"><span class="muted small">No liabilities yet. Add them in the Liabilities tab.</span></div>')}
+      ${repAll.some(repEmpty) ? `<button class="inlineadd" style="color:var(--muted)" data-act="planEmpty" data-sec="repay">${ui.planShowEmpty.repay ? 'Hide liabilities with nothing to pay' : `Show ${repHidden} with nothing to pay this month`}</button>` : ''}</section>
   </main>`;
 }
 
+function progressRing(pct, color) {
+  const c = 2 * Math.PI * 22;
+  return `<svg width="60" height="60" viewBox="0 0 52 52" role="img" aria-label="${Math.round(pct)}% of target" style="flex:0 0 auto">
+    <circle cx="26" cy="26" r="22" fill="none" stroke="var(--line2)" stroke-width="6"/>
+    <circle cx="26" cy="26" r="22" fill="none" stroke="${esc(color)}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${((pct / 100) * c).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 26 26)"/>
+    <text x="26" y="30" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">${Math.round(pct)}%</text></svg>`;
+}
 function goalLineCtl(g, r) {
   const v = safe(() => goalRowVal(g, r, curM()));
   if (v instanceof FErr || r.f) {
@@ -1001,13 +1090,16 @@ function screenGoals() {
       progress = `<div class="kv"><span>Date</span><span>${esc(mLong(g.date))}</span></div>`;
     }
     const rows = g.rows.map((r) => `<div class="row" style="min-height:56px;padding:8px 0">
-        <span class="main"><span class="name" style="font-size:15px;font-weight:500">${esc(r.label)}</span>${r.f ? `<span class="meta">${esc(toDisplay(r.f))}</span>` : ''}</span>
+        <span class="main"><span class="name" style="font-size:15px;font-weight:500">${esc(r.label)}</span>${r.f ? `<span class="meta">${esc(toDisplay(r.f))}</span>` : ''}${r.note ? `<span class="meta rownote">${esc(r.note)}</span>` : ''}</span>
         ${goalLineCtl(g, r)}${moreBtn('editGoalRow', { gid: g.id, rid: r.id }, r.label)}</div>`).join('');
     return `<section class="card pad" style="display:flex;flex-direction:column;gap:10px">
       <div style="display:flex;align-items:center;gap:10px"><span class="dot" style="background:${esc(g.color || 'var(--accent)')}"></span>
         <h2 style="margin:0;font-size:18px;font-weight:700;flex:1 1 auto;overflow-wrap:anywhere">${esc(g.name)}</h2>${moreBtn('editGoal', { id: g.id }, g.name)}</div>
-      <div style="display:flex;flex-direction:column;gap:2px"><span class="small muted">Money for this goal</span>
+      ${g.note ? `<span class="note rownote" style="margin-top:-6px">${esc(g.note)}</span>` : ''}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span class="small muted">Money for this goal</span>
         <span class="num" style="font-size:32px;font-weight:800;letter-spacing:-0.02em;color:${aErr ? 'var(--err-ink)' : 'var(--ink)'}">${esc(aErr ? '⚠ ' + avail.message : fmt(avail))}</span></div>
+        ${g.target && !aErr && !tErr && tgt > 0 ? progressRing(Math.max(0, Math.min(100, (avail / tgt) * 100)), g.color || 'var(--accent)') : ''}</div>
       <div class="row" style="min-height:52px;padding:4px 0;border-bottom:0"><span class="main"><span class="name" style="font-size:15px">Target</span><span class="meta">Optional. Leave blank for none.</span></span>${tCtl}${moreBtn('editGoal', { id: g.id }, g.name + ' target')}</div>
       ${tErr ? `<div class="box bad">${esc(tgt.message)}</div>` : ''}
       ${progress}
@@ -1301,12 +1393,13 @@ function sheetLine(sh) {
     ${sw('carry', fv('carry', ln.behaviour === 'carry'), 'Carry forward a closing balance', 'Keeps a running balance: last month’s closing + this month’s amount')}
     ${fv('carry', ln.behaviour === 'carry') ? `<div class="field"><label for="openIn">Opening balance (before ${esc(mLabel(firstM()))})</label><input id="openIn" data-field="opening" inputmode="decimal" value="${esc(fv('opening', String(ln.opening || 0)))}"></div>` : ''}
     <span class="cap2">ADVANCED</span><div class="field"><label for="actIn">Actual amount, if different from plan (optional)</label><input id="actIn" data-field="actual" inputmode="decimal" autocomplete="off" value="${esc(fv('actual', e.actual != null ? String(e.actual) : ''))}" placeholder="Not yet"><span class="hint">Once entered, forecasts use the actual instead of the plan.</span></div>
+    <div class="field"><label for="noteIn">Note (optional)</label><textarea id="noteIn" data-field="note" rows="2" maxlength="300" style="min-height:64px;padding:10px 12px;font-size:16px;font-weight:400">${esc(fv('note', ln.note || ''))}</textarea></div>
     ${sw('bold', fv('bold', !!ln.bold), 'Bold')}
     ${users.length ? `<div class="box info">Used in: ${esc(users.join('; '))}</div>` : ''}
     <p class="note">Last updated: ${esc(own || e.actual != null ? stamp(e.at) : stamp(ln.at))}</p>
     <button class="btn primary wide" data-act="saveLine">Save</button>
     ${!isNew && (own || e.actual != null) ? `<button class="btn wide" data-act="clearLineMonth">Clear ${esc(mShort(sh.m))} amount (use recurring)</button>` : ''}
-    ${!isNew ? `<button class="btn danger wide" data-act="deleteLine">Delete row from every month</button>` : ''}`;
+    ${!isNew ? `<button class="btn danger wide" data-act="deleteLine">Remove row from ${esc(mLabel(sh.m))} onwards</button>` : ''}`;
 }
 
 function sheetRepay(sh) {
@@ -1326,10 +1419,12 @@ function sheetRepay(sh) {
     ${mode === 'value' ? `<div class="field"><input aria-label="Repayment amount in pounds" data-field="amt" inputmode="decimal" value="${esc(fv('amt', e.amt != null ? String(e.amt) : ''))}" placeholder="${esc(cur instanceof FErr ? '0' : String(cur))}"><span class="hint">${inh && !(e.f || e.amt != null) ? `Currently ${esc(fmt(cur))}, recurring from ${esc(mLabel(inh.from))}.` : `Blank uses the default ${esc(fmt(Number(l.repay) || 0))}.`}</span></div>` : fxEditor(sh)}
     <button type="button" class="opt" data-act="seg" data-field-name="once" data-v="true" aria-pressed="${once === 'true'}"><b>One-off</b><span>This month only</span></button>
     <button type="button" class="opt" data-act="seg" data-field-name="once" data-v="false" aria-pressed="${once !== 'true'}"><b>Recurring</b><span>This month and after, until changed</span></button>
+    <span class="cap2">NEW BORROWING</span>
+    <div class="field"><label for="borIn">Borrowed on ${esc(l.name)} in ${esc(mLong(sh.m))} (£)</label><input id="borIn" data-field="borrow" inputmode="decimal" value="${esc(fv('borrow', borrowAmt(sh.id, sh.m) ? String(borrowAmt(sh.id, sh.m)) : ''))}" placeholder="0"><span class="hint">Adds to the balance this month and counts as money in for the plan, so spending it doesn’t show as overspent. This month only.</span></div>
     <div class="field"><label for="actIn">Actual paid (optional)</label><input id="actIn" data-field="actual" inputmode="decimal" value="${esc(fv('actual', e.actual != null ? String(e.actual) : ''))}" placeholder="Not yet"></div>
     <p class="note">Last updated: ${esc(e.at ? stamp(e.at) : 'never')}</p>
     <button class="btn primary wide" data-act="saveRepay">Save</button>
-    ${e.f || e.amt != null || e.actual != null || e.on != null ? `<button class="btn wide" data-act="clearRepayMonth">Reset ${esc(mShort(sh.m))} to default</button>` : ''}`;
+    ${e.f || e.amt != null || e.actual != null || e.on != null || borrowAmt(sh.id, sh.m) ? `<button class="btn wide" data-act="clearRepayMonth">Reset ${esc(mShort(sh.m))} to default</button>` : ''}`;
 }
 
 function sheetCat(sh) {
@@ -1348,6 +1443,8 @@ function sheetCat(sh) {
     <div class="field"><label for="isaSel">ISA type</label><select id="isaSel" data-field="isa">${[['', 'Not an ISA'], ['ss', 'Stocks & Shares ISA'], ['cash', 'Cash ISA'], ['lisa', 'Lifetime ISA'], ['other', 'Other ISA']].map(([v, l]) => `<option value="${v}" ${v === fv('isa', c.isa || '') ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     ${fv('isa', c.isa || '') ? `${sw('flexible', fv('flexible', !!c.flexible), 'Flexible ISA', 'Withdrawals can be replaced in the same tax year. Ask your provider.')}
       <div class="field"><label for="priorIn">Paid in ${tyName(cty)} before tracking started (£)</label><input id="priorIn" data-field="prior" inputmode="decimal" value="${esc(fv('prior', String((c.isaPrior || {})[cty] || '')))}" placeholder="0"></div>` : ''}
+    ${fv('kind', c.kind || 'held') === 'held' ? `<div class="field"><label for="growIn">Expected growth % per year (optional)</label><input id="growIn" data-field="growth" inputmode="decimal" value="${esc(fv('growth', c.growth ? String(c.growth) : ''))}" placeholder="0"><span class="hint">Used only in forecast months, on last month’s balance. Contributions and ISA allowance are tracked separately.</span></div>` : ''}
+    <div class="field"><label for="noteIn">Note (optional)</label><textarea id="noteIn" data-field="note" rows="2" maxlength="300" style="min-height:64px;padding:10px 12px;font-size:16px;font-weight:400">${esc(fv('note', c.note || ''))}</textarea></div>
     <span class="cap2">DECIMAL PLACES</span>${seg('dp', [['', 'Default'], ['0', '0'], ['2', '2']], fv('dp', c.dp == null ? '' : String(c.dp)))}
     ${sw('bold', fv('bold', !!c.bold), 'Bold')}
     ${!isNew ? sw('hidden', fv('hidden', !!c.hidden), 'Hide', 'Hidden categories keep their data, formulas and place in the total') : ''}
@@ -1366,11 +1463,26 @@ function sheetLiab(sh) {
     ${sw('autoPay', fv('autoPay', isNew ? true : !!l.autoPay), 'Pay every month by default', 'Switch individual months on or off in Plan')}
     <span class="cap2">COLOUR</span>${swatches('color', fv('color', l.color || COLORS[(S.liabs.length + 4) % COLORS.length]))}
     ${sw('inTotal', fv('inTotal', isNew ? true : usesRef(S.liabTotal.f, 'l', l.id)), 'Include in Total liabilities')}
+    <div class="field"><label for="noteIn">Note (optional)</label><textarea id="noteIn" data-field="note" rows="2" maxlength="300" style="min-height:64px;padding:10px 12px;font-size:16px;font-weight:400">${esc(fv('note', l.note || ''))}</textarea></div>
     ${sw('bold', fv('bold', !!l.bold), 'Bold')}
     ${!isNew ? sw('hidden', fv('hidden', !!l.hidden), 'Hide', 'Hidden liabilities keep their data and place in the total') : ''}
     ${used.length ? `<div class="box info">Used in: ${esc(used.join('; '))}</div>` : ''}
     <button class="btn primary wide" data-act="saveLiab">${isNew ? 'Add liability' : 'Save'}</button>
     ${!isNew ? '<button class="btn danger wide" data-act="deleteLiab">Delete liability</button>' : ''}`;
+}
+function sheetCheckIn() {
+  const m = curM();
+  const line = (kind, it, val, ccy, isF) => `<div class="row" style="min-height:56px;padding:6px 0">
+    <span class="dot" style="background:${esc(it.color)}"></span><span class="main"><span class="name" style="font-size:15px">${esc(it.name)}</span>${isF ? '<span class="meta">Formula, kept as is</span>' : ''}</span>
+    ${isF ? `<span class="v calc">${esc(fmt(val, ccy))}</span>` : `<span class="inl calc"><span class="cur" aria-hidden="true">${ccy === 'INR' ? '₹' : '£'}</span><input class="num" data-field="ci_${kind}_${it.id}" value="${esc(fv(`ci_${kind}_${it.id}`, numStr(val)))}" inputmode="decimal" aria-label="${esc(it.name)} balance"></span>`}</div>`;
+  const cats = S.cats.filter((c) => !c.hidden).map((c) => { const v = safe(() => catNative(c.id, m)); const cell = (S.catCells[c.id] || {})[m]; return line('s', c, typeof v === 'number' ? v : 0, c.ccy, cell && cell.f); }).join('');
+  const ls = S.liabs.filter((l) => !l.hidden).map((l) => { const v = safe(() => liabVal(l.id, m)); const cell = (S.liabCells[l.id] || {})[m]; return line('l', l, typeof v === 'number' ? v : 0, 'GBP', cell && cell.f); }).join('');
+  return `${phead('New month', `Your ${mLong(m)} balances`)}
+    <p class="note">Filled in from the forecast. Change any that differ from your real balances, then confirm. Confirmed figures are saved for ${esc(mLong(m))}, and later months forecast from them.</p>
+    <span class="cap2">SAVINGS</span><div class="list">${cats || '<span class="note">None</span>'}</div>
+    ${ls ? `<span class="cap2">LIABILITIES</span><div class="list">${ls}</div>` : ''}
+    <button class="btn primary wide" data-act="saveCheckIn">Confirm balances</button>
+    <button class="btn wide" data-act="skipCheckIn">Skip this month</button>`;
 }
 function sheetGoal(sh) {
   const g = goalById(sh.id) || sh.draftGoal;
@@ -1385,6 +1497,7 @@ function sheetGoal(sh) {
     ${tmode === 'value' ? `<div class="field"><input aria-label="Target amount in pounds" data-field="tval" inputmode="decimal" value="${esc(fv('tval', g.target && g.target.v != null ? String(g.target.v) : ''))}" placeholder="0"></div>` : ''}
     ${tmode === 'formula' ? fxEditor(sh) : ''}
     <div class="field"><label for="dateIn">Target date (optional)</label><input id="dateIn" type="month" data-field="date" value="${esc(fv('date', g.date || ''))}" min="${curM()}"><span class="hint">With a target and a date, the card shows how much to set aside each month.</span></div>
+    <div class="field"><label for="noteIn">Note (optional)</label><textarea id="noteIn" data-field="note" rows="2" maxlength="300" style="min-height:64px;padding:10px 12px;font-size:16px;font-weight:400">${esc(fv('note', g.note || ''))}</textarea></div>
     <span class="cap2">COLOUR</span>${swatches('color', fv('color', g.color || COLORS[S.goals.length % COLORS.length]))}
     ${!isNew ? `<div class="btnrow"><button class="btn" data-act="moveGoal" data-dir="-1" ${idx <= 0 ? 'disabled' : ''}>Move up</button><button class="btn" data-act="moveGoal" data-dir="1" ${idx >= S.goals.length - 1 ? 'disabled' : ''}>Move down</button></div>` : ''}
     ${used.length ? `<div class="box info">Used in: ${esc(used.join('; '))}</div>` : ''}
@@ -1400,6 +1513,7 @@ function sheetGoalRow(sh) {
     <div class="field"><label for="labIn">Label</label><input id="labIn" data-field="label" value="${esc(fv('label', r.label))}" maxlength="60" autocomplete="off" placeholder="e.g. From Cash ISA, Flights booked"></div>
     ${seg('mode', [['value', 'Typed amount'], ['formula', 'Formula']], mode)}
     ${mode === 'value' ? `<div class="field"><input aria-label="Amount in pounds" data-field="val" inputmode="decimal" value="${esc(fv('val', r.v != null ? String(r.v) : ''))}" placeholder="0"><span class="hint">Use a minus amount for money already spent or set aside elsewhere.</span></div>` : fxEditor(sh)}
+    <div class="field"><label for="noteIn">Note (optional)</label><textarea id="noteIn" data-field="note" rows="2" maxlength="300" style="min-height:64px;padding:10px 12px;font-size:16px;font-weight:400">${esc(fv('note', r.note || ''))}</textarea></div>
     <p class="note">Formulas use this month’s figures unless you pick a month. Lines are added up to give the money for this goal.</p>
     <button class="btn primary wide" data-act="saveGoalRow">${isNew ? 'Add line' : 'Save'}</button>
     ${!isNew ? '<button class="btn danger wide" data-act="deleteGoalRow">Delete line</button>' : ''}`;
@@ -1497,7 +1611,7 @@ function renderSheet() {
   const sh = ui.sheet;
   if (!sh) { host.innerHTML = ''; document.body.style.overflow = ''; return; }
   const scrollTop = $('#sheet .panel') ? $('#sheet .panel').scrollTop : 0;
-  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow };
+  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow, checkin: sheetCheckIn };
   resetCalc();
   host.innerHTML = `<div class="shade" data-act="shade"><div class="panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">${builders[sh.type](sh)}</div></div>`;
   document.body.style.overflow = 'hidden';
@@ -1548,7 +1662,8 @@ function uniqueName(arr, name, selfId) {
 
 const ACT = {
   tab: (d) => { ui.tab = d.tab; ui.sheet = null; renderSheet(); render(true); },
-  pickMonth: (d) => { ui.m = d.m; render(); },
+  pickMonth: (d) => { ui.m = d.m; ui.justAdded.clear(); render(); },
+  planEmpty: (d) => { ui.planShowEmpty[d.sec] = !ui.planShowEmpty[d.sec]; render(); },
   ovMore: () => { ui.ovMore = !ui.ovMore; render(); },
   undo: () => {
     if (!undoStack.length) return;
@@ -1586,8 +1701,13 @@ const ACT = {
   fxRef: (d) => {
     const scope = fv('scope', '');
     const at = scope === '' ? '' : scope === 'prev' ? ' @ previous month' : ' @ ' + mLabel(scope);
-    insertAtCaret('[' + refName(d.k, d.id) + at + ']');
-    toast('Inserted');
+    const el = $('#fx');
+    const pos = ui.sheet.caret != null ? ui.sheet.caret : (el ? el.value.length : 0);
+    const before = el ? el.value.slice(0, pos).trimEnd() : '';
+    // Picking a value right after another value adds them, so no need to type +.
+    const joiner = /[\])0-9%]$/.test(before) ? (el.value.slice(0, pos).endsWith(' ') ? '+ ' : ' + ') : '';
+    insertAtCaret(joiner + '[' + refName(d.k, d.id) + at + ']');
+    toast(joiner ? 'Added with +' : 'Inserted');
   },
 
   /* savings and liabilities cells */
@@ -1644,12 +1764,14 @@ const ACT = {
     const dpRaw = fv('dp', c && c.dp != null ? String(c.dp) : '');
     const kind = fv('kind', c ? c.kind : 'held');
     const inTotal = fv('inTotal', c ? usesRef(S.savTotal.f, 's', c.id) : kind === 'held');
+    const growth = kind === 'held' ? readNum('growth') : null;
+    if (growth != null && (growth < -50 || growth > 50)) throw new FErr('Growth should be between −50% and 50% a year');
     mutate(() => {
       const t = c || { id: uid(), isaPrior: {}, hidden: false };
       Object.assign(t, {
         name, kind, ccy: fv('ccy', c ? c.ccy : 'GBP'), color: fv('color', c ? c.color : COLORS[S.cats.length % COLORS.length]),
         isa, flexible: !!fv('flexible', c ? c.flexible : false), bold: !!fv('bold', c ? c.bold : false),
-        hidden: !!fv('hidden', c ? c.hidden : false), dp: dpRaw === '' ? null : Number(dpRaw), at: now()
+        hidden: !!fv('hidden', c ? c.hidden : false), dp: dpRaw === '' ? null : Number(dpRaw), growth: growth || null, note: cleanNote(fv('note', c ? c.note : '')), at: now()
       });
       if (isa) t.isaPrior[taxYear(curM())] = prior || 0;
       if (!c) S.cats.push(t);
@@ -1689,7 +1811,7 @@ const ACT = {
     const inTotal = fv('inTotal', l ? usesRef(S.liabTotal.f, 'l', l.id) : true);
     mutate(() => {
       const t = l || { id: uid(), hidden: false };
-      Object.assign(t, { name, repay: rep || 0, autoPay: !!fv('autoPay', l ? l.autoPay : true), color: fv('color', l ? l.color : COLORS[(S.liabs.length + 4) % COLORS.length]), bold: !!fv('bold', l ? l.bold : false), hidden: !!fv('hidden', l ? l.hidden : false), at: now() });
+      Object.assign(t, { name, repay: rep || 0, autoPay: !!fv('autoPay', l ? l.autoPay : true), color: fv('color', l ? l.color : COLORS[(S.liabs.length + 4) % COLORS.length]), bold: !!fv('bold', l ? l.bold : false), hidden: !!fv('hidden', l ? l.hidden : false), note: cleanNote(fv('note', l ? l.note : '')), at: now() });
       if (!l) {
         S.liabs.push(t);
         if (bal != null) { S.liabCells[t.id] = { [curM()]: { v: bal, f: null, at: now() } }; }
@@ -1706,14 +1828,14 @@ const ACT = {
     if (!confirm(`Delete “${l.name}”, its balances and its repayments in every month?` + (used.length ? `\n\nThese formulas use it and will show an error until fixed:\n• ${used.join('\n• ')}` : '') + '\n\nYou can undo this.')) return;
     mutate(() => {
       S.liabs = S.liabs.filter((x) => x.id !== l.id);
-      delete S.liabCells[l.id]; delete S.repay[l.id];
+      delete S.liabCells[l.id]; delete S.repay[l.id]; delete S.borrow[l.id];
       S.liabTotal.f = removeRefFromSum(S.liabTotal.f, 'l', l.id);
     }, 'Liability deleted');
     closeSheet();
   }),
 
   /* plan rows */
-  newLine: (d) => openSheet({ type: 'line', id: null, m: ui.m, draftLine: { id: uid(), sec: d.sec, name: '', link: null, behaviour: 'normal', opening: 0, bold: false, entries: {}, at: now() }, f: { once: 'false' } }),
+  newLine: (d) => openSheet({ type: 'line', id: null, m: ui.m, draftLine: { id: uid(), sec: d.sec, name: '', link: null, behaviour: 'normal', opening: 0, bold: false, entries: {}, start: ui.m > firstM() ? ui.m : null, end: null, at: now() }, f: { once: 'false' } }),
   editLine: (d) => { const ln = lineById(d.id); const e = ln.entries[d.m] || {}; openSheet({ type: 'line', id: d.id, m: d.m, f: { fx: toDisplay(e.f || '') } }); },
   saveLine: guard(() => {
     collect();
@@ -1740,11 +1862,12 @@ const ACT = {
     mutate(() => {
       let t = lineById(ln.id);
       if (!t) { t = clone(ln); S.lines.push(t); }
-      t.name = name; t.behaviour = carry ? 'carry' : 'normal'; t.opening = opening; t.bold = !!fv('bold', t.bold); t.at = now();
+      t.name = name; t.behaviour = carry ? 'carry' : 'normal'; t.opening = opening; t.bold = !!fv('bold', t.bold); t.note = cleanNote(fv('note', t.note)); t.at = now();
       if (t.sec === 'saving') t.link = fv('link', t.link || '') || null;
       if (amt == null && f == null && actual == null) delete t.entries[sh.m];
       else t.entries[sh.m] = { amt, f, once, actual, at: now() };
-    }, existing ? 'Saved' : 'Row added');
+      if (!existing) ui.justAdded.add(t.id);
+    }, existing ? 'Saved' : `Row added from ${mLabel(sh.m)} onwards`);
     closeSheet();
   }),
   clearLineMonth: () => {
@@ -1754,11 +1877,44 @@ const ACT = {
   },
   deleteLine: () => {
     const ln = lineById(ui.sheet.id);
-    const used = usagesOf('p', ln.id);
-    if (!confirm(`Delete the row “${ln.name}” from every month?` + (used.length ? `\n\nThese formulas use it and will show an error until fixed:\n• ${used.join('\n• ')}` : '') + '\n\nYou can undo this.')) return;
-    mutate(() => { S.lines = S.lines.filter((x) => x.id !== ln.id); }, 'Row deleted');
+    const m = ui.sheet.m;
+    const startsAt = ln.start && ln.start > firstM() ? ln.start : firstM();
+    if (m > startsAt) {
+      // Earlier months keep the row; it stops from this month.
+      if (!confirm(`Remove “${ln.name}” from ${mLabel(m)} onwards?\n\nEarlier months keep it. You can undo this.`)) return;
+      mutate(() => { const t = lineById(ln.id); t.end = m; t.at = now(); }, `Removed from ${mLabel(m)} onwards`);
+    } else {
+      const used = usagesOf('p', ln.id);
+      if (!confirm(`Remove “${ln.name}”? It starts in ${mLabel(startsAt)}, so it will be removed completely.` + (used.length ? `\n\nThese formulas use it and will show an error until fixed:\n• ${used.join('\n• ')}` : '') + '\n\nYou can undo this.')) return;
+      mutate(() => { S.lines = S.lines.filter((x) => x.id !== ln.id); }, 'Row removed');
+    }
     closeSheet();
   },
+
+  /* month-start check-in */
+  openCheckIn: () => openSheet({ type: 'checkin', m: curM() }),
+  saveCheckIn: guard(() => {
+    collect();
+    const m = curM();
+    const vals = [];
+    for (const [kind, arr, store] of [['s', S.cats, 'catCells'], ['l', S.liabs, 'liabCells']]) {
+      for (const it of arr) {
+        const key = `ci_${kind}_${it.id}`;
+        if (ui.sheet.f[key] === undefined) continue;
+        const n = parseAmount(ui.sheet.f[key]);
+        if (n == null) continue;
+        if (isNaN(n)) throw new FErr(`${it.name}: “${ui.sheet.f[key]}” isn’t a number`);
+        if (kind === 'l' && n < 0) throw new FErr(`${it.name}: use a positive amount`);
+        vals.push([store, it.id, n]);
+      }
+    }
+    mutate(() => {
+      for (const [store, id, n] of vals) { S[store][id] = S[store][id] || {}; S[store][id][m] = { v: n, f: null, at: now() }; }
+      S.settings.checkIn = m;
+    }, `${mLong(m)} balances confirmed`);
+    closeSheet();
+  }),
+  skipCheckIn: () => { mutate(() => { S.settings.checkIn = curM(); }, 'Skipped. You’ll be asked again next month.'); closeSheet(); },
 
   /* goals */
   newGoal: () => openSheet({ type: 'goal', id: null, m: curM(), draftGoal: { id: uid(), name: '', color: COLORS[S.goals.length % COLORS.length], target: null, date: null, rows: [{ id: uid(), label: 'Saved so far', v: null, f: null }] } }),
@@ -1785,7 +1941,7 @@ const ACT = {
     mutate(() => {
       let g = goalById(g0.id);
       if (!g) { g = clone(g0); S.goals.push(g); }
-      Object.assign(g, { name, target, date: date || null, color: fv('color', g.color), at: now() });
+      Object.assign(g, { name, target, date: date || null, color: fv('color', g.color), note: cleanNote(fv('note', g.note)), at: now() });
     }, existing ? 'Saved' : 'Goal added');
     closeSheet();
   }),
@@ -1825,7 +1981,7 @@ const ACT = {
       const g = goalById(sh.gid);
       let r = g.rows.find((x) => x.id === r0.id);
       if (!r) { r = clone(r0); g.rows.push(r); }
-      Object.assign(r, { label, v, f, at: now() });
+      Object.assign(r, { label, v, f, note: cleanNote(fv('note', r.note)), at: now() });
     }, existing ? 'Saved' : 'Line added');
     closeSheet();
   }),
@@ -1857,6 +2013,7 @@ const ACT = {
     const once = fv('once', String(!!e0.once)) === 'true';
     const actual = readNum('actual', { min: 0 });
     const on = !!fv('on', repayOn(sh.id, sh.m));
+    const borrow = readNum('borrow', { min: 0 });
     let amt = null, f = null;
     if (mode === 'value') amt = readNum('amt', { min: 0 });
     else { const text = String(fv('fx', '')).trim(); if (text) f = validateFormula(sh, text); }
@@ -1866,10 +2023,12 @@ const ACT = {
       const e = { amt, f, once, actual, at: now() };
       if (on !== !!l.autoPay) e.on = on; else if (e0.on != null) e.on = on;
       S.repay[sh.id][sh.m] = e;
+      S.borrow[sh.id] = S.borrow[sh.id] || {};
+      if (borrow) S.borrow[sh.id][sh.m] = { amt: borrow, at: now() }; else delete S.borrow[sh.id][sh.m];
     }, 'Saved');
     closeSheet();
   }),
-  clearRepayMonth: () => { const sh = ui.sheet; mutate(() => { if (S.repay[sh.id]) delete S.repay[sh.id][sh.m]; }, 'Reset'); closeSheet(); },
+  clearRepayMonth: () => { const sh = ui.sheet; mutate(() => { if (S.repay[sh.id]) delete S.repay[sh.id][sh.m]; if (S.borrow[sh.id]) delete S.borrow[sh.id][sh.m]; }, 'Reset'); closeSheet(); },
 
   /* months */
   fcount: (d) => { mutate(() => { S.settings.forecastMonths = Math.min(36, Math.max(0, S.settings.forecastMonths + Number(d.d))); }); ui.sheet.keepScroll = true; renderSheet(); render(); },
@@ -1928,7 +2087,7 @@ const ACT = {
   exportJSON: guard(async () => {
     const blob = new Blob([JSON.stringify({ app: 'my-finances', exportedAt: new Date().toISOString(), data: S }, null, 2)], { type: 'application/json' });
     if (await deliver(blob, `my-finances-backup-${new Date().toISOString().slice(0, 10)}.json`)) {
-      S.settings.lastBackup = now(); save(); toast('Backup created'); if (ui.sheet) rerenderSheet(); render();
+      S.settings.lastBackup = now(); S.settings.changes = 0; save(); toast('Backup created'); if (ui.sheet) rerenderSheet(); render();
     }
   }),
   exportXLSX: guard(async () => {
@@ -2064,6 +2223,8 @@ function buildWorkbookModel() {
   let pr = 2;
   ['income', 'expense', 'saving'].forEach((sec) => S.lines.filter((l) => l.sec === sec).forEach((l) => { lineRow[l.id] = pr++; }));
   S.liabs.forEach((l) => { repRow[l.id] = pr++; });
+  const brRow = {};
+  S.liabs.forEach((l) => { brRow[l.id] = pr++; });
   const planTot = pr + 1;
 
   months.forEach((m, i) => {
@@ -2074,7 +2235,7 @@ function buildWorkbookModel() {
     addr[`L|_|${m}`] = `${sheetRef('Liabilities')}!$${col}$${liaTotRow}`;
     const pn = sheetRef(plainSheetName(m));
     S.lines.forEach((l) => { addr[`p|${l.id}|${m}`] = `${pn}!$C$${lineRow[l.id]}`; addr[`pu|${l.id}|${m}`] = `${pn}!$E$${lineRow[l.id]}`; });
-    S.liabs.forEach((l) => { addr[`ru|${l.id}|${m}`] = `${pn}!$E$${repRow[l.id]}`; });
+    S.liabs.forEach((l) => { addr[`ru|${l.id}|${m}`] = `${pn}!$E$${repRow[l.id]}`; addr[`bw|${l.id}|${m}`] = `${pn}!$E$${brRow[l.id]}`; });
   });
 
   // Translate an app formula into an Excel formula; returns null if something can't be expressed.
@@ -2106,7 +2267,8 @@ function buildWorkbookModel() {
       let f = null;
       if (cell && cell.f) { const x = xl(cell.f, m); f = x && (c.ccy === 'INR' ? `(${x})*${RATE}` : x); }
       else if (!(cell && cell.v != null) && m > firstM()) {
-        const prev = addr[`sN|${c.id}|${addM(m, -1)}`];
+        const prev0 = addr[`sN|${c.id}|${addM(m, -1)}`];
+        const prev = c.growth ? `${prev0}*(1+${monthlyRate(c.growth)})` : prev0;
         const links = S.lines.filter((l) => l.sec === 'saving' && l.link === c.id).map((l) => addr[`pu|${l.id}|${m}`]);
         const add = links.length ? '+' + (c.ccy === 'INR' ? `(${links.join('+')})*${RATE}` : links.join('+')) : '';
         f = prev + add;
@@ -2131,7 +2293,7 @@ function buildWorkbookModel() {
       const cell = (S.liabCells[l.id] || {})[m];
       let f = null;
       if (cell && cell.f) f = xl(cell.f, m);
-      else if (!(cell && cell.v != null) && m > firstM()) f = `MAX(0,${addr[`l|${l.id}|${addM(m, -1)}`]}-${addr[`ru|${l.id}|${m}`]})`;
+      else if (!(cell && cell.v != null) && m > firstM()) f = `MAX(0,${addr[`l|${l.id}|${addM(m, -1)}`]}+${addr[`bw|${l.id}|${m}`]}-${addr[`ru|${l.id}|${m}`]})`;
       const cl = cellFor(() => liabVal(l.id, m), f); cl.b = l.bold;
       put(lia, row, 3 + i, cl);
     });
@@ -2147,12 +2309,12 @@ function buildWorkbookModel() {
       const row = lineRow[l.id];
       put(ps, row, 1, { s: l.name, b: l.bold });
       put(ps, row, 2, { s: secName[l.sec] + (l.sec === 'saving' && catById(l.link) ? ' → ' + catById(l.link).name : '') });
-      const found = findEntry(l.entries, m);
+      const found = lineActive(l, m) ? findEntry(l.entries, m) : null;
       let f = null;
       if (found && found.e.f) f = xl(found.e.f, m);
       else if (found && found.from !== m && addr[`p|${l.id}|${found.from}`]) f = addr[`p|${l.id}|${found.from}`];
       put(ps, row, 3, cellFor(() => linePlanned(l, m), f));
-      const e = l.entries[m];
+      const e = lineActive(l, m) ? l.entries[m] : null;
       if (e && e.actual != null) put(ps, row, 4, { n: e.actual });
       put(ps, row, 5, cellFor(() => lineUsed(l, m), `IF(D${row}="",C${row},D${row})`));
     });
@@ -2164,6 +2326,9 @@ function buildWorkbookModel() {
       const e = (S.repay[l.id] || {})[m];
       if (e && e.actual != null) put(ps, row, 4, { n: e.actual });
       put(ps, row, 5, cellFor(() => repayUsed(l.id, m), `IF(D${row}="",C${row},D${row})`));
+      const br = brRow[l.id];
+      put(ps, br, 1, { s: 'Borrowed: ' + l.name }); put(ps, br, 2, { s: 'New borrowing (adds to liability)' });
+      put(ps, br, 5, { n: borrowAmt(l.id, m) });
     });
     const sumOf = (rows) => (rows.length ? `SUM(${rows.map((x) => 'E' + x).join(',')})` : '0');
     const groups = [
@@ -2175,7 +2340,9 @@ function buildWorkbookModel() {
     const psum = safe(() => planSummary(m));
     const vals = psum instanceof FErr ? [0, 0, 0, 0] : [psum.income, psum.expense, psum.saving, psum.repay];
     groups.forEach(([label, rows], gi) => { put(ps, planTot + gi, 1, { s: label, b: true }); put(ps, planTot + gi, 5, { n: vals[gi], f: sumOf(rows), b: true }); });
-    let leftF = `E${planTot}-E${planTot + 1}-E${planTot + 2}-E${planTot + 3}`;
+    put(ps, planTot + 6, 1, { s: 'Borrowed', b: true });
+    put(ps, planTot + 6, 5, { n: psum instanceof FErr ? 0 : psum.borrow, f: S.liabs.length ? `SUM(${S.liabs.map((l) => 'E' + brRow[l.id]).join(',')})` : '0', b: true });
+    let leftF = `E${planTot}-E${planTot + 1}-E${planTot + 2}-E${planTot + 3}+E${planTot + 6}`;
     if (S.settings.carryLeft && m > firstM()) {
       put(ps, planTot + 4, 1, { s: 'Brought forward' });
       put(ps, planTot + 4, 5, { n: psum instanceof FErr ? 0 : psum.bf, f: `MAX(0,${sheetRef(plainSheetName(addM(m, -1)))}!$E$${planTot + 5})` });
@@ -2273,6 +2440,7 @@ function buildCSV() {
   lines.push([q('Liabilities'), q('Total liabilities'), q('GBP')].concat(months.map((m) => n(() => liabTotal(m)))).join(','));
   S.lines.forEach((l) => lines.push([q('Plan: ' + l.sec), q(l.name), q('GBP')].concat(months.map((m) => n(() => lineUsed(l, m)))).join(',')));
   S.liabs.forEach((l) => lines.push([q('Plan: repayment'), q(l.name), q('GBP')].concat(months.map((m) => n(() => repayUsed(l.id, m)))).join(',')));
+  S.liabs.forEach((l) => lines.push([q('Plan: borrowed'), q(l.name), q('GBP')].concat(months.map((m) => n(() => borrowAmt(l.id, m)))).join(',')));
   lines.push([q('Plan'), q('Left to allocate'), q('GBP')].concat(months.map((m) => n(() => planSummary(m).left))).join(','));
   lines.push('');
   lines.push(['Goal', 'Line', 'Amount now'].map(q).join(','));

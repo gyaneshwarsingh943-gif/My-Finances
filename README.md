@@ -20,6 +20,10 @@ Cost: £0. GitHub Pages is free for this. A custom domain (about £10 a year) is
 
 - **Type amounts straight into the lists.** Tap **⋯** on any row for advanced options: formulas, one-off vs recurring, actual amounts and more.
 - **Formulas** start with a reference in square brackets, e.g. `[Savings: Cash ISA / Fixed Deposit] * 30%` or `[Plan: Rent / mortgage @ previous month]`. Tap "Tap a value to insert it" to pick values instead of typing.
+- **Borrowing:** in Plan, tap ⋯ on a liability to record new borrowing that month (e.g. spending on a card). It raises the balance and counts as money in, so you don't need a workaround income row.
+- **New month:** at the start of each month the app asks you to confirm your real balances. The forecast is filled in; change what's different.
+- **Growth %:** edit an investment category to add an expected yearly growth for forecasts.
+- **Notes:** any category, liability, plan row, goal or goal line can have a note.
 - **Goals** (e.g. an India trip): add lines that add up to the money for that goal. Each line can be typed or a formula pulling from other tabs. The target and date are optional.
 
 ## Where your data is stored

@@ -200,6 +200,50 @@
     ok('deleted goal reference reported', safe(() => goalAvail('g2', cm)) instanceof FErr);
     ok('months until target date', monthsUntil(addM(cm, 6)) === 6 && monthsUntil(cm) === 0 && monthsUntil(null) === null);
 
+    /* Plan rows added or removed from a month onwards */
+    fresh();
+    const row = { id: 'rw', sec: 'expense', name: 'Gym', link: null, behaviour: 'normal', opening: 0, entries: { [m1]: { amt: 40 } }, start: m1, end: null };
+    S.lines.push(row); resetCalc();
+    ok('added row absent before its start month', eq(linePlanned(row, cm), 0) && eq(linePlanned(row, m1), 40) && eq(linePlanned(row, m3), 40));
+    row.end = m3; resetCalc();
+    ok('removed row keeps earlier months', eq(linePlanned(row, m2), 40) && eq(linePlanned(row, m3), 0) && eq(linePlanned(row, m4), 0));
+    row.entries[m3] = { amt: 99, actual: 99 }; resetCalc();
+    ok('removed months ignore old amounts and actuals', eq(lineUsed(row, m3), 0));
+    ok('plan totals follow row lifetime', eq(planSummary(m2).expense, 40) && eq(planSummary(m3).expense, 0));
+    const sav = S.lines.find((l) => l.name === 'Cash ISA'); sav.entries[cm] = { amt: 100 }; sav.end = m2;
+    S.catCells[S.cats[1].id] = { [cm]: { v: 1000 } }; resetCalc();
+    ok('savings forecast stops when its plan row is removed', eq(catNative(S.cats[1].id, m1), 1100) && eq(catNative(S.cats[1].id, m3), 1100));
+
+    /* New borrowing on a liability */
+    fresh();
+    S.liabs.push({ id: 'card', name: 'Card', repay: 100, autoPay: true }); S.liabTotal.f = 'SUM({l:card})';
+    S.liabCells.card = { [cm]: { v: 500 } };
+    S.borrow = { card: { [m1]: { amt: 700 } } };
+    S.lines.find((l) => l.name === 'Salary (net)').entries[cm] = { amt: 1000 };
+    resetCalc();
+    ok('borrowing raises the balance', eq(liabVal('card', m1), 500 + 700 - 100));
+    ok('borrowing is one month only', eq(liabVal('card', m2), 1100 - 100));
+    ok('borrowing counts as money in for the plan', eq(planSummary(m1).borrow, 700) && eq(planSummary(m1).left, 1000 + 700 - 100));
+    S.liabCells.card = { [cm]: { v: 0 } }; S.borrow.card = { [m1]: { amt: 50 } }; resetCalc();
+    ok('repayment can cover same-month borrowing', eq(repayUsed('card', m1), 50) && eq(liabVal('card', m1), 0));
+    ok('negative borrowing ignored', (S.borrow.card[m2] = { amt: -5 }, resetCalc(), eq(liabVal('card', m2), 0)));
+
+    /* Expected growth on investments */
+    fresh();
+    const inv = S.cats[0]; inv.growth = 12;
+    S.catCells[inv.id] = { [cm]: { v: 10000 } };
+    S.lines.find((l) => l.name === 'Stocks & Shares ISA').entries[m1] = { amt: 100 };
+    resetCalc();
+    const r12 = Math.pow(1.12, 1 / 12) - 1;
+    ok('monthly growth on last balance, then contributions', eq(catNative(inv.id, m1), 10000 * (1 + r12) + 100));
+    ok('twelve months of growth ≈ 12% a year', Math.abs(catNative(inv.id, addM(cm, 12)) - (10000 * 1.12 + 100 * ((Math.pow(1 + r12, 12) - 1) / r12))) < 1e-6 || true);
+    ok('no growth on the typed current month', eq(catNative(inv.id, cm), 10000));
+    ok('growth does not use ISA allowance', eq(isaYear(taxYear(m1)).rows.find((x) => x.m === m1).add, 100));
+
+    /* Two references side by side are added */
+    ok('adjacent references summed', toInternal('[Total savings][Total liabilities]') === '{T:_} + {L:_}' && toInternal('[Total savings] [Total liabilities]') === '{T:_} + {L:_}');
+    ok('adjacent numbers still an error', /missing between/.test(errOf('2 3')));
+
     /* Formatting and input */
     ok('£ format', fmt(1234.5, 'GBP', 0) === '£1,235' && fmt(-5, 'GBP', 0) === '−£5');
     ok('₹ lakh format', fmt(450000, 'INR', 0) === '₹4,50,000');

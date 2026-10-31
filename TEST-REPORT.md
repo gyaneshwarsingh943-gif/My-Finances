@@ -1,14 +1,14 @@
 # Test report: My Finances 1.0
 
 Date: 31 October 2026
-Build tested: the files in this folder (offline cache version `my-finances-v3`), including the Goals tab and one-column Plan.
+Build tested: the files in this folder (offline cache version `my-finances-v5`), including liability borrowing, month-start check-in, trend chart and goal rings, backup prompts every 10 changes, expected growth %, notes on rows, Goals, one-column Plan, plan rows added or removed from a month onwards, auto-sum of picked values, collapsed empty rows and the compact liabilities total.
 Environment: Chromium (the Claude desktop app's built-in browser) emulating a 375×812 iPhone screen, served from a local web server. Not a real iPhone; see "Not tested".
 
 ## Release decision
 
 | Release condition | Status |
 |---|---|
-| All financial calculation tests pass | **Met.** 90 of 90 automated engine tests pass on the final build. |
+| All financial calculation tests pass | **Met.** 106 of 106 automated engine tests pass on the final build. |
 | All data recovery tests pass | **Met.** 20 of 20 checks pass (persistence, corrupt storage, backup/restore, undo, confirmations). |
 | No known defects causing wrong balances, lost data or broken core workflows | **Met.** Two such defects were found during testing and fixed (below). None known now. |
 | Remaining minor issues documented | **Met.** See "Known minor issues". |
@@ -24,7 +24,7 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 
 ## What was tested and passed
 
-### Calculation engine: 90/90 pass (`tests/engine-tests.js`)
+### Calculation engine: 106/106 pass (`tests/engine-tests.js`)
 - **Savings forecast:** typed balance; recurring allocation; one-off £1,200 that applies only to its month and then returns to the recurring £700; actual amount replacing planned; editing a plan amount updates every later month.
 - **Worked example:** £1,200 November allocation, giving a Cash ISA forecast of £10,450 and a November total of £33,404.
 - **Currency:** ₹ balance kept as typed and converted at the editable rate; a rate change updates £ totals; a £ allocation into a ₹ account is converted; ₹ amounts typed inside formulas are rejected, so different currencies are never added together.
@@ -39,6 +39,10 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 - **ISA:** allowance used and remaining; contributions linked from Plan; manual override; a non-flexible withdrawal doesn't restore allowance, a flexible one does; forecast split at the 6 April tax-year boundary; £12,000 Cash ISA limit from 2027/28 for under-65s, none for 65+; editable allowances.
 - **Months:** zero forecast months; hidden months still calculated; calculations run through a hidden month; month arithmetic across year ends; automatic rollover when a new month starts; device clock moved backwards.
 - **Goals:** manual, formula, negative and blank lines added up; no target allowed; typed target; formula target; goals follow other tabs live; readable `[Goal: …]` references; one goal referencing another; goal loops caught; deleted goal reported; months until target date.
+- **Row lifetime:** a row added in a month is absent before it; a row removed from a month keeps earlier months, ignores old amounts afterwards, and its savings link stops too.
+- **Borrowing:** raises the liability balance; applies to one month only; counts as money in for the plan; a repayment can cover same-month borrowing; negative amounts ignored.
+- **Growth %:** monthly growth on last month's balance before contributions; none on the typed current month; doesn't use ISA allowance.
+- **Auto-sum:** two references side by side are added; two plain numbers side by side are still an error.
 - **Formatting and input:** £ and ₹ (lakh grouping) formats; no "−£0"; amount parsing; a damaged backup repaired on load.
 
 ### Screens and workflows: all pass (scripted clicks and typing at iPhone size)
@@ -55,6 +59,12 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 - **Excel export:** valid file with 11 sheets, all XML well-formed, 160 formulas, every sheet reference valid, balanced brackets, no leftover internal references. The cached values match the app.
 - **CSV export:** builds correctly.
 - **Offline:** with the server stopped, the app reloaded from its cache and worked.
+
+### New features, clicked through: 30/30 pass
+Growth % and note saved, shown and explained; unrealistic growth (80%) rejected; borrowing via ⋯ raises the balance and shows in the Plan total and row text; notes on liabilities, plan rows and goals; goal progress ring (25%); trend chart on Overview; the backup prompt appears at 10 changes on every tab and clears after a backup; month-start check-in appears when a new month starts, is pre-filled with the forecast, saves real balances that later months forecast from, and can be skipped; Excel includes borrowing rows and growth formulas; CSV includes borrowing.
+
+### Real data check
+Your backup from 31 Oct 2026 loaded into the latest version (v5) with no calculation errors, identical totals for every month and no unexpected check-in prompt. In an earlier check it also loaded in any month and unchanged totals. On that data: empty rows collapsed; Rent removed from Jan 2027 onwards while Nov/Dec kept £1,100; a row added in Dec didn't appear in Nov; removing a row in its first month removed it completely; picking two values inserted `+` and summed to £430; the liabilities formula is hidden behind "ƒ Formula"; undo restored everything. 16/16 checks pass.
 
 ### Data recovery: 20/20 checks pass
 Saved immediately after each change; survives reload. Corrupted storage: a copy is kept, a warning is shown, and the app stays usable. Restoring from backup gives exactly the same totals and formulas. Undoing a restore works. An invalid or garbage backup file is rejected without changing data. Cancelling a restore changes nothing. "Erase all" needs two confirmations, cancel keeps data, and erase can be undone (undo is saved). Cancelling a delete keeps the item.
