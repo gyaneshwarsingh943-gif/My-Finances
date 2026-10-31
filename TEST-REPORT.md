@@ -1,14 +1,14 @@
 # Test report: My Finances 1.0
 
 Date: 31 October 2026
-Build tested: the files in this folder (app version 8, offline cache `my-finances-v8`), including the investment growth projection on Overview, reliable updates with Check for updates, "Cover with borrowing" for overspends (flagged in red), liability borrowing, month-start check-in, trend chart and goal rings, backup prompts every 10 changes, expected growth %, notes on rows, Goals, one-column Plan, plan rows added or removed from a month onwards, auto-sum of picked values, collapsed empty rows and the compact liabilities total.
+Build tested: the files in this folder (app version 9, offline cache `my-finances-v9`), including the goal spending plan, the investment growth projection on Overview, reliable updates with Check for updates, "Cover with borrowing" for overspends (flagged in red), liability borrowing, month-start check-in, trend chart and goal rings, backup prompts every 10 changes, expected growth %, notes on rows, Goals, one-column Plan, plan rows added or removed from a month onwards, auto-sum of picked values, collapsed empty rows and the compact liabilities total.
 Environment: Chromium (the Claude desktop app's built-in browser) emulating a 375×812 iPhone screen, served from a local web server. Not a real iPhone; see "Not tested".
 
 ## Release decision
 
 | Release condition | Status |
 |---|---|
-| All financial calculation tests pass | **Met.** 123 of 123 automated engine tests pass on the final build. |
+| All financial calculation tests pass | **Met.** 130 of 130 automated engine tests pass on the final build. |
 | All data recovery tests pass | **Met.** 20 of 20 checks pass (persistence, corrupt storage, backup/restore, undo, confirmations). |
 | No known defects causing wrong balances, lost data or broken core workflows | **Met.** Two such defects were found during testing and fixed (below). None known now. |
 | Remaining minor issues documented | **Met.** See "Known minor issues". |
@@ -25,7 +25,7 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 
 ## What was tested and passed
 
-### Calculation engine: 123/123 pass (`tests/engine-tests.js`)
+### Calculation engine: 130/130 pass (`tests/engine-tests.js`)
 - **Savings forecast:** typed balance; recurring allocation; one-off £1,200 that applies only to its month and then returns to the recurring £700; actual amount replacing planned; editing a plan amount updates every later month.
 - **Worked example:** £1,200 November allocation, giving a Cash ISA forecast of £10,450 and a November total of £33,404.
 - **Currency:** ₹ balance kept as typed and converted at the editable rate; a rate change updates £ totals; a £ allocation into a ₹ account is converted; ₹ amounts typed inside formulas are rejected, so different currencies are never added together.
@@ -42,6 +42,7 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 - **Goals:** manual, formula, negative and blank lines added up; no target allowed; typed target; formula target; goals follow other tabs live; readable `[Goal: …]` references; one goal referencing another; goal loops caught; deleted goal reported; months until target date.
 - **Row lifetime:** a row added in a month is absent before it; a row removed from a month keeps earlier months, ignores old amounts afterwards, and its savings link stops too.
 - **Borrowing:** raises the liability balance; applies to one month only; counts as money in for the plan; a repayment can cover same-month borrowing; negative amounts ignored.
+- **Goal spending plan:** six empty rows to start; the typed target is used until spending amounts exist; then target = sum of projected spend; added rows count; rows with a name but no amount are ignored; no target when both are empty; older goals get a spending plan on load.
 - **Growth projection:** matches the standard investment future-value formula (starting balance compounded, plus monthly savings each growing from the following month) at 1 and 4 months; 8% a year gives exactly 8% after 12 months; only investment categories grow; the main forecast is unchanged; no growth in the current month; 0% or no rate equals the forecast; a typed future balance resets the projection.
 - **Overspend cover:** a covered overspend balances the month, goes into the liability like other debt, adds to manual borrowing, stops being flagged once repaid, and creates a balance on a new liability in the first month.
 - **Growth %:** monthly growth on last month's balance before contributions; none on the typed current month; doesn't use ISA allowance.
@@ -71,6 +72,9 @@ Red "Over by" box with button; cover sheet pre-filled with the shortfall and you
 
 ### Growth projection on your data: all pass
 It asks for a rate; 8% is saved; the summary and month-by-month table cover the same months as the savings forecast; your Stocks & Shares follows the formula exactly (Mar 2027: £39,015 → £39,702 at 8%); only Stocks & Shares grows; the dotted trend line can be hidden and shown; categories can be chosen; an 80% entry is rejected and the field snaps back; clearing the rate switches it off; Excel has a Growth projection sheet. Testing found and fixed one display bug: a rejected rate stayed visible in the box.
+
+### Goal spending plan on your data: all pass
+Your India Trip goal got six empty rows, collapsed by default; names and amounts save; target = £1,130 for Flights £650 + Hotels £480; Target reached, £1,270 spare against £2,400; Add row creates and focuses a new row (repeated 3 times, reliable); a 7th row counts (target £2,630, still needed £230); negative and text amounts are rejected; each goal collapses on its own; Overview shows "£2,400 of £2,630"; included in Excel and CSV; saved; undo works.
 
 ### Real data check
 Your backup from 31 Oct 2026 loaded into the latest version (v5) with no calculation errors, identical totals for every month and no unexpected check-in prompt. In an earlier check it also loaded in any month and unchanged totals. On that data: empty rows collapsed; Rent removed from Jan 2027 onwards while Nov/Dec kept £1,100; a row added in Dec didn't appear in Nov; removing a row in its first month removed it completely; picking two values inserted `+` and summed to £430; the liabilities formula is hidden behind "ƒ Formula"; undo restored everything. 16/16 checks pass.

@@ -200,6 +200,23 @@
     ok('deleted goal reference reported', safe(() => goalAvail('g2', cm)) instanceof FErr);
     ok('months until target date', monthsUntil(addM(cm, 6)) === 6 && monthsUntil(cm) === 0 && monthsUntil(null) === null);
 
+    /* Goal spending plan sets the target */
+    fresh();
+    const gsp = { id: 'gs', name: 'Holiday', target: { v: 999, f: null }, rows: [{ id: 'gr1', label: 'Saved', v: 400, f: null }], spend: blankSpend() };
+    S.goals.push(gsp); resetCalc();
+    ok('six empty spending rows to start', gsp.spend.length === 6 && spendSum(gsp) === 0);
+    ok('without spending amounts the typed target is used', eq(goalTarget(gsp, cm), 999));
+    gsp.spend[0] = { id: 'a', name: 'Flights', amt: 650 }; gsp.spend[1] = { id: 'b', name: 'Hotel', amt: 480 }; gsp.spend[2] = { id: 'c', name: 'Notes only', amt: null };
+    resetCalc();
+    ok('target = sum of projected spend', eq(goalTarget(gsp, cm), 1130) && spendCount(gsp) === 2);
+    gsp.spend.push(...blankSpend(3)); gsp.spend[8].amt = 70; resetCalc();
+    ok('extra rows count', gsp.spend.length === 9 && eq(goalTarget(gsp, cm), 1200));
+    gsp.target = null; resetCalc();
+    ok('works with no typed target', hasTarget(gsp) && eq(goalTarget(gsp, cm), 1200));
+    gsp.spend.forEach((r) => { r.amt = null; }); resetCalc();
+    ok('no target when spending plan and target are empty', !hasTarget(gsp) && goalTarget(gsp, cm) === null);
+    ok('old goals get a spending plan on load', Array.isArray(migrate({ cats: [], settings: {}, goals: [{ id: 'x', name: 'Old', rows: [] }] }).goals[0].spend));
+
     /* Plan rows added or removed from a month onwards */
     fresh();
     const row = { id: 'rw', sec: 'expense', name: 'Gym', link: null, behaviour: 'normal', opening: 0, entries: { [m1]: { amt: 40 } }, start: m1, end: null };

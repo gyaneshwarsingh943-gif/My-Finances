@@ -25,6 +25,7 @@ Cost: £0. GitHub Pages is free for this. A custom domain (about £10 a year) is
 - **Growth projection:** on Overview, enter a yearly return (e.g. 8%) to see what your savings could be with investment growth, month by month and as a dotted line on the trend chart (can be hidden). It never changes your main forecast.
 - **Growth %:** edit an investment category to add an expected yearly growth for forecasts.
 - **Notes:** any category, liability, plan row, goal or goal line can have a note.
+- **Goal spending plan:** each goal has a collapsible table of items and projected spend (six rows to start, + Add row for more). The total becomes the goal's target.
 - **Goals** (e.g. an India trip): add lines that add up to the money for that goal. Each line can be typed or a formula pulling from other tabs. The target and date are optional.
 
 ## Where your data is stored

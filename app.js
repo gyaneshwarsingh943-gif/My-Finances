@@ -3,7 +3,7 @@
    All data lives in this browser's storage on this device. */
 
 const KEY = 'myfinances.v1';
-const APP_VERSION = '8';
+const APP_VERSION = '9';
 const COLORS = ['#1E5E52', '#2F6F9F', '#B5651D', '#6B5B95', '#8E3B2F', '#7A6A55', '#C9A04F', '#3F7F3A'];
 /* Layout colour themes: accent and its soft tint, for light and dark mode. All pass 4.5:1 with white text. */
 const THEMES = {
@@ -87,7 +87,7 @@ function parseAmount(str) {
 /* ---------------- state ---------------- */
 let S = null;
 let undoStack = [];
-const ui = { projOpen: false, tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false }, planShowEmpty: {}, justAdded: new Set() };
+const ui = { spendOpen: {}, projOpen: false, tab: 'overview', m: null, sheet: null, edit: { s: false, l: false }, ovMore: false, showHidden: { s: false, l: false }, planShowEmpty: {}, justAdded: new Set() };
 
 function blankState() {
   const m = curM();
@@ -130,7 +130,11 @@ function migrate(d) {
   d.settings.forecastMonths = Math.min(36, Math.max(0, parseInt(d.settings.forecastMonths, 10) || 0));
   if (!/^\d{4}-\d{2}$/.test(d.settings.firstMonth || '')) d.settings.firstMonth = curM();
   ['cats', 'liabs', 'lines', 'goals'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
-  d.goals.forEach((g) => { if (!Array.isArray(g.rows)) g.rows = []; if (g.target && typeof g.target !== 'object') g.target = null; });
+  d.goals.forEach((g) => {
+    if (!Array.isArray(g.rows)) g.rows = [];
+    if (g.target && typeof g.target !== 'object') g.target = null;
+    if (!Array.isArray(g.spend)) g.spend = blankSpend();
+  });
   ['catCells', 'liabCells', 'repay', 'isaOv', 'borrow'].forEach((k) => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
   // Existing data: start month check-ins from now, so nobody is asked about a month already under way.
   if (!/^\d{4}-\d{2}$/.test(d.settings.checkIn || '')) d.settings.checkIn = curM();
@@ -186,6 +190,11 @@ const catById = (id) => S.cats.find((c) => c.id === id);
 const liabById = (id) => S.liabs.find((l) => l.id === id);
 const lineById = (id) => S.lines.find((l) => l.id === id);
 const goalById = (id) => S.goals.find((g) => g.id === id);
+// Each goal has a simple spending plan: item name + projected spend. Starts with six empty rows.
+const blankSpend = (n = 6) => Array.from({ length: n }, () => ({ id: uid(), name: '', amt: null }));
+const spendSum = (g) => (g.spend || []).reduce((t, r) => t + (typeof r.amt === 'number' && isFinite(r.amt) ? r.amt : 0), 0);
+const spendCount = (g) => (g.spend || []).filter((r) => typeof r.amt === 'number' && r.amt !== 0).length;
+const hasTarget = (g) => spendSum(g) !== 0 || !!g.target;
 const catDp = (c) => (c && c.dp != null ? c.dp : S.settings.decimals);
 
 /* ---------------- formula engine ---------------- */
@@ -536,6 +545,8 @@ function goalAvail(id, m) {
   return calc(`g|${id}|${m}`, () => { const g = goalById(id); return g.rows.reduce((t, r) => t + goalRowVal(g, r, m), 0); });
 }
 function goalTarget(g, m) {
+  // The spending plan total is the target whenever it has amounts.
+  if (spendSum(g) !== 0) return spendSum(g);
   if (!g.target) return null;
   return calc(`gt|${g.id}|${m}`, () => (g.target.f ? evalIn(g.target.f, m) : Number(g.target.v) || 0));
 }
@@ -740,9 +751,15 @@ function moreBtn(act, data, name) {
 function commitInline(el) {
   const d = el.dataset;
   if (el.value.trim() === d.orig.trim()) return false;
+  if (d.inl === 'spname') {
+    const name = String(el.value).replace(/\s+/g, ' ').trim().slice(0, 60);
+    d.orig = el.value;
+    mutate(() => { const g = goalById(d.id); const r = g && g.spend.find((x) => x.id === d.k); if (r) r.name = name; });
+    return true;
+  }
   const n = parseAmount(el.value);
   if (n != null && isNaN(n)) { toast(`“${el.value}” isn’t a number`); el.value = d.orig; return false; }
-  if (n != null && n < 0 && (d.inl === 'repay' || d.k === 'l')) { toast('Use a positive amount'); el.value = d.orig; return false; }
+  if (n != null && n < 0 && (d.inl === 'repay' || d.inl === 'spamt' || d.k === 'l')) { toast('Use a positive amount'); el.value = d.orig; return false; }
   if (d.inl === 'projRate' && n != null && (n < -50 || n > 50)) { toast('Use a yearly return between −50% and 50%'); el.value = d.orig; return false; }
   const m = d.m;
   d.orig = el.value; // stops a second save when the field then loses focus
@@ -762,6 +779,8 @@ function commitInline(el) {
       if (e.amt == null && !e.f && e.actual == null) delete ln.entries[m]; else ln.entries[m] = e;
       ln.at = now();
     }, d.inl === 'plan' && n == null ? 'Using the recurring amount' : null);
+  } else if (d.inl === 'spamt') {
+    mutate(() => { const g = goalById(d.id); const r = g && g.spend.find((x) => x.id === d.k); if (r) r.amt = n; });
   } else if (d.inl === 'projRate') {
     mutate(() => { S.settings.proj = Object.assign({ cats: null, line: true }, S.settings.proj, { rate: n }); }, n == null ? 'Growth projection off' : null);
   } else if (d.inl === 'grow' || d.inl === 'gtarget') {
@@ -905,7 +924,7 @@ function screenOverview() {
       <button class="tile" data-act="tab" data-tab="isa"><span class="sub">ISA allowance left</span><span class="val num">${esc(isaLeft)}</span><span class="sub small">Tax year ${tyName(taxYear(cm))}</span></button>
     </div>
     ${S.goals.length ? `<button class="card pad" data-act="tab" data-tab="goals" style="text-align:left;display:flex;flex-direction:column;gap:6px;color:var(--ink)"><span class="cap2">GOALS</span>
-      ${S.goals.map((g) => { const a = safe(() => goalAvail(g.id, cm)); const t = g.target ? safe(() => goalTarget(g, cm)) : null;
+      ${S.goals.map((g) => { const a = safe(() => goalAvail(g.id, cm)); const t = hasTarget(g) ? safe(() => goalTarget(g, cm)) : null;
         return `<span class="kv" style="width:100%"><span>${esc(g.name)}</span><span class="num" style="font-weight:600">${a instanceof FErr ? '⚠' : esc(fmt(a))}${t != null ? ` <span class="muted" style="font-weight:400">of ${t instanceof FErr ? '⚠' : esc(fmt(t))}</span>` : ''}</span></span>`; }).join('')}</button>` : ''}
     <div class="legend" style="padding:4px 2px">
       <span><i style="background:var(--card);border:1px solid var(--field)"></i>Typed value</span>
@@ -1155,17 +1174,35 @@ function goalLineCtl(g, r) {
   }
   return inlineInput({ kind: 'grow', k: r.id, id: g.id, m: curM(), ccy: 'GBP', value: r.v == null ? '' : numStr(r.v), cls: 'manual', label: `${g.name}, ${r.label}, amount in pounds` });
 }
+function spendTable(g) {
+  const open = !!ui.spendOpen[g.id];
+  const sum = spendSum(g), n = spendCount(g);
+  const rows = (g.spend || []).map((r, i) => `<div class="sprow">
+      <input class="spname" data-inl="spname" data-id="${g.id}" data-k="${r.id}" data-m="${curM()}" data-key="spname|${r.id}" data-orig="${esc(r.name || '')}" value="${esc(r.name || '')}" placeholder="Item ${i + 1}" maxlength="60" autocomplete="off" enterkeyhint="next" aria-label="${esc(g.name)} spending item ${i + 1} name">
+      <span class="inl manual"><span class="cur" aria-hidden="true">£</span><input class="num" data-inl="spamt" data-id="${g.id}" data-k="${r.id}" data-m="${curM()}" data-key="spamt|${r.id}" data-orig="${r.amt == null ? '' : esc(numStr(r.amt))}" value="${r.amt == null ? '' : esc(numStr(r.amt))}" placeholder="0" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label="${esc(r.name || 'Item ' + (i + 1))} projected spend in pounds"></span></div>`).join('');
+  return `<div class="sptable">
+    <button class="sphead" data-act="spendToggle" data-id="${g.id}" aria-expanded="${open}">
+      <span style="font-weight:700">Spending plan</span>
+      <span class="num muted" style="margin-left:auto">${esc(fmt(sum))}${n ? ` · ${n} item${n > 1 ? 's' : ''}` : ''}</span>
+      <span aria-hidden="true" style="width:18px;text-align:right">${open ? '▴' : '▾'}</span></button>
+    ${open ? `<div class="sprow h"><span>ITEM</span><span style="text-align:right">PROJECTED SPEND</span></div>${rows}
+      <div class="sprow" style="border-top:1px solid var(--line2);padding-top:10px"><span style="font-weight:700">Total = target</span><span class="num" style="font-weight:800;text-align:right">${esc(fmt(sum))}</span></div>
+      <button class="inlineadd" style="border-top:0;padding:0" data-act="spendAdd" data-id="${g.id}">+ Add row</button>` : ''}
+  </div>`;
+}
 function screenGoals() {
   const m = curM();
   const cards = S.goals.map((g) => {
     const avail = safe(() => goalAvail(g.id, m));
-    const tgt = g.target ? safe(() => goalTarget(g, m)) : null;
+    const tgt = hasTarget(g) ? safe(() => goalTarget(g, m)) : null;
     const aErr = avail instanceof FErr, tErr = tgt instanceof FErr;
+    const fromSpend = spendSum(g) !== 0;
     let tCtl;
-    if (g.target && (tErr || g.target.f)) tCtl = `<button class="v ${tErr ? 'err' : 'calc'}" data-act="editGoal" data-id="${g.id}" aria-label="Target: formula. Open to edit">${esc(tErr ? '⚠ Error' : 'ƒ ' + fmt(tgt))}</button>`;
+    if (fromSpend) tCtl = `<span class="v calc" aria-label="Target from spending plan">${esc(fmt(tgt))}</span>`;
+    else if (g.target && (tErr || g.target.f)) tCtl = `<button class="v ${tErr ? 'err' : 'calc'}" data-act="editGoal" data-id="${g.id}" aria-label="Target: formula. Open to edit">${esc(tErr ? '⚠ Error' : 'ƒ ' + fmt(tgt))}</button>`;
     else tCtl = inlineInput({ kind: 'gtarget', id: g.id, m, ccy: 'GBP', value: g.target ? numStr(g.target.v) : '', ph: 'None', cls: 'manual', label: `${g.name}, target in pounds (optional)` });
     let progress = '';
-    if (g.target && !aErr && !tErr) {
+    if (hasTarget(g) && !aErr && !tErr) {
       const rem = tgt - avail;
       const pct = tgt > 0 ? Math.max(0, Math.min(100, (avail / tgt) * 100)) : 100;
       const mu = monthsUntil(g.date);
@@ -1191,11 +1228,12 @@ function screenGoals() {
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
         <div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span class="small muted">Money for this goal</span>
         <span class="num" style="font-size:32px;font-weight:800;letter-spacing:-0.02em;color:${aErr ? 'var(--err-ink)' : 'var(--ink)'}">${esc(aErr ? '⚠ ' + avail.message : fmt(avail))}</span></div>
-        ${g.target && !aErr && !tErr && tgt > 0 ? progressRing(Math.max(0, Math.min(100, (avail / tgt) * 100)), g.color || 'var(--accent)') : ''}</div>
-      <div class="row" style="min-height:52px;padding:4px 0;border-bottom:0"><span class="main"><span class="name" style="font-size:15px">Target</span><span class="meta">Optional. Leave blank for none.</span></span>${tCtl}${moreBtn('editGoal', { id: g.id }, g.name + ' target')}</div>
+        ${hasTarget(g) && !aErr && !tErr && tgt > 0 ? progressRing(Math.max(0, Math.min(100, (avail / tgt) * 100)), g.color || 'var(--accent)') : ''}</div>
+      <div class="row" style="min-height:52px;padding:4px 0;border-bottom:0"><span class="main"><span class="name" style="font-size:15px">Target</span><span class="meta">${fromSpend ? 'Total of the spending plan below' : 'Optional. Leave blank, or fill in the spending plan.'}</span></span>${tCtl}${moreBtn('editGoal', { id: g.id }, g.name + ' target')}</div>
       ${tErr ? `<div class="box bad">${esc(tgt.message)}</div>` : ''}
       ${progress}
-      <div class="cap2" style="margin-top:4px">LINES (ADDED UP)</div>
+      ${spendTable(g)}
+      <div class="cap2" style="margin-top:4px">MONEY FOR THIS GOAL (LINES ADDED UP)</div>
       <div class="list">${rows || '<span class="note">No lines yet.</span>'}</div>
       <button class="inlineadd" style="border-top:0;padding:0" data-act="newGoalRow" data-gid="${g.id}">+ Add line</button>
     </section>`;
@@ -1610,6 +1648,7 @@ function sheetGoal(sh) {
   return `${phead('Goals', isNew ? 'New goal' : 'Edit goal')}
     <div class="field"><label for="nameIn">Name</label><input id="nameIn" data-field="name" value="${esc(fv('name', g.name))}" maxlength="60" autocomplete="off" placeholder="e.g. India trip"></div>
     <span class="cap2">TARGET (OPTIONAL)</span>
+    ${spendSum(g) !== 0 ? `<div class="box info">The target is the spending plan total (${esc(fmt(spendSum(g)))}). Clear the spending plan amounts to use a target set here instead.</div>` : ''}
     ${seg('tmode', [['none', 'No target'], ['value', 'Amount'], ['formula', 'Formula']], tmode)}
     ${tmode === 'value' ? `<div class="field"><input aria-label="Target amount in pounds" data-field="tval" inputmode="decimal" value="${esc(fv('tval', g.target && g.target.v != null ? String(g.target.v) : ''))}" placeholder="0"></div>` : ''}
     ${tmode === 'formula' ? fxEditor(sh) : ''}
@@ -2010,6 +2049,16 @@ const ACT = {
     closeSheet();
   },
 
+  /* goal spending plan */
+  spendToggle: (d) => { ui.spendOpen[d.id] = !ui.spendOpen[d.id]; render(); },
+  spendAdd: (d) => {
+    let newId = null;
+    mutate(() => { const g = goalById(d.id); const r = blankSpend(1)[0]; newId = r.id; g.spend.push(r); });
+    ui.spendOpen[d.id] = true; render();
+    const el = $$('#app [data-key]').find((x) => x.dataset.key === `spname|${newId}`);
+    if (el) el.focus();
+  },
+
   /* growth projection */
   projToggle: () => { ui.projOpen = !ui.projOpen; render(); },
   projLine: () => { mutate(() => { S.settings.proj.line = S.settings.proj.line === false; }); render(); },
@@ -2080,7 +2129,7 @@ const ACT = {
   skipCheckIn: () => { mutate(() => { S.settings.checkIn = curM(); }, 'Skipped. You’ll be asked again next month.'); closeSheet(); },
 
   /* goals */
-  newGoal: () => openSheet({ type: 'goal', id: null, m: curM(), draftGoal: { id: uid(), name: '', color: COLORS[S.goals.length % COLORS.length], target: null, date: null, rows: [{ id: uid(), label: 'Saved so far', v: null, f: null }] } }),
+  newGoal: () => openSheet({ type: 'goal', id: null, m: curM(), draftGoal: { id: uid(), name: '', color: COLORS[S.goals.length % COLORS.length], target: null, date: null, rows: [{ id: uid(), label: 'Saved so far', v: null, f: null }], spend: blankSpend() } }),
   editGoal: (d) => { const g = goalById(d.id); openSheet({ type: 'goal', id: d.id, m: curM(), f: { fx: toDisplay(g.target && g.target.f ? g.target.f : '') } }); },
   saveGoal: guard(() => {
     collect();
@@ -2558,7 +2607,16 @@ function buildWorkbookModel() {
     put(gs, gr, 1, { s: g.name, b: true }); put(gs, gr, 2, { s: 'Money for this goal', b: true });
     const tot = cellFor(() => goalAvail(g.id, cmx), gr > first ? `SUM(C${first}:C${gr - 1})` : '0'); tot.b = true; put(gs, gr, 3, tot);
     const totRow = gr; gr++;
-    if (g.target) {
+    const spendItems = (g.spend || []).filter((r) => r.name || (typeof r.amt === 'number' && r.amt));
+    if (spendItems.length) {
+      put(gs, gr, 1, { s: g.name, b: true }); put(gs, gr, 2, { s: 'Spending plan', b: true }); gr++;
+      const s0 = gr;
+      spendItems.forEach((r) => { put(gs, gr, 1, { s: g.name }); put(gs, gr, 2, { s: r.name || '(no name)' }); put(gs, gr, 3, { n: typeof r.amt === 'number' ? r.amt : 0 }); gr++; });
+      put(gs, gr, 1, { s: g.name }); put(gs, gr, 2, { s: 'Target (spending plan total)', b: true });
+      put(gs, gr, 3, { n: spendSum(g), f: `SUM(C${s0}:C${gr - 1})`, b: true }); gr++;
+      put(gs, gr, 1, { s: g.name }); put(gs, gr, 2, { s: 'Still needed' });
+      put(gs, gr, 3, cellFor(() => spendSum(g) - goalAvail(g.id, cmx), `C${gr - 1}-C${totRow}`)); gr++;
+    } else if (g.target) {
       put(gs, gr, 1, { s: g.name }); put(gs, gr, 2, { s: 'Target' });
       put(gs, gr, 3, cellFor(() => goalTarget(g, cmx), g.target.f ? xl(g.target.f, cmx) : null));
       if (g.target.f) put(gs, gr, 4, { s: '= ' + toDisplay(g.target.f) });
@@ -2633,7 +2691,8 @@ function buildCSV() {
   S.goals.forEach((g) => {
     g.rows.forEach((r) => lines.push([q(g.name), q(r.label), n(() => goalRowVal(g, r, curM()))].join(',')));
     lines.push([q(g.name), q('Money for this goal'), n(() => goalAvail(g.id, curM()))].join(','));
-    if (g.target) lines.push([q(g.name), q('Target'), n(() => goalTarget(g, curM()))].join(','));
+    (g.spend || []).filter((r) => r.name || (typeof r.amt === 'number' && r.amt)).forEach((r) => lines.push([q(g.name), q('Spend: ' + (r.name || '(no name)')), String(typeof r.amt === 'number' ? r.amt : 0)].join(',')));
+    if (hasTarget(g)) lines.push([q(g.name), q('Target'), n(() => goalTarget(g, curM()))].join(','));
   });
   return lines.join('\r\n');
 }

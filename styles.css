@@ -289,3 +289,11 @@ button.v { min-height: 44px; cursor: pointer; }
 .pjrow { display: grid; grid-template-columns: 52px 1fr 1fr 74px; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line2); font-size: 13px; align-items: center; }
 .pjrow span:not(:first-child) { text-align: right; }
 .pjrow.h { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; border-top: 0; padding-top: 0; }
+
+.sptable { border: 1px solid var(--line); border-radius: 14px; padding: 4px 12px 8px; display: flex; flex-direction: column; }
+.sphead { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 0; background: transparent; padding: 0; color: var(--ink); font-size: 15px; text-align: left; width: 100%; }
+.sprow { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; padding: 4px 0; }
+.sprow.h { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; padding: 2px 0; }
+.sprow .inl { width: 100%; }
+.spname { min-height: 44px; border-radius: 10px; border: 1px solid var(--field); background: var(--card); padding: 0 10px; font-size: 16px; color: var(--ink); width: 100%; min-width: 0; }
+.spname:focus { border: 2px solid var(--accent); outline: none; padding: 0 9px; }
