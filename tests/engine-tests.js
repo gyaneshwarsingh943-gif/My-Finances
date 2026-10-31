@@ -228,6 +228,27 @@
     ok('repayment can cover same-month borrowing', eq(repayUsed('card', m1), 50) && eq(liabVal('card', m1), 0));
     ok('negative borrowing ignored', (S.borrow.card[m2] = { amt: -5 }, resetCalc(), eq(liabVal('card', m2), 0)));
 
+    /* Overspend covered with borrowing */
+    fresh();
+    S.liabs.push({ id: 'ov', name: 'Over spent', repay: 0, autoPay: true }); S.liabTotal.f = 'SUM({l:ov})';
+    S.liabCells.ov = { [cm]: { v: 80 } };
+    S.lines.find((l) => l.name === 'Salary (net)').entries[m1] = { amt: 1000, once: true };
+    S.lines.find((l) => l.name === 'Rent / mortgage').entries[m1] = { amt: 1300, once: true };
+    resetCalc();
+    ok('over by before cover', eq(planSummary(m1).left, -300));
+    S.borrow.ov = { [m1]: { amt: 0, over: 300 } }; resetCalc();
+    ok('cover makes the month balance', eq(planSummary(m1).left, 0) && eq(planSummary(m1).over, 300));
+    ok('overspend goes to the liability like other debt', eq(liabVal('ov', m1), 380) && eq(liabVal('ov', m2), 380));
+    ok('overspend flagged amount', eq(overAmt('ov', m1), 300) && eq(overInBalance('ov', m2), 300));
+    S.borrow.ov[m1].amt = 50; resetCalc();
+    ok('manual borrowing and overspend add up', eq(borrowAmt('ov', m1), 350) && eq(liabVal('ov', m1), 430));
+    S.repay.ov = { [m2]: { amt: 1000 } }; resetCalc();
+    ok('repaid overspend no longer flagged', eq(liabVal('ov', m2), 0) && eq(overInBalance('ov', m2), 0));
+    fresh();
+    S.liabs.push({ id: 'nw', name: 'Overspend', repay: 0, autoPay: true });
+    S.borrow.nw = { [cm]: { over: 120 } }; resetCalc();
+    ok('new liability in the first month holds the overspend', eq(liabVal('nw', cm), 120));
+
     /* Expected growth on investments */
     fresh();
     const inv = S.cats[0]; inv.growth = 12;

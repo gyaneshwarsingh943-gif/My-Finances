@@ -1,14 +1,14 @@
 # Test report: My Finances 1.0
 
 Date: 31 October 2026
-Build tested: the files in this folder (offline cache version `my-finances-v5`), including liability borrowing, month-start check-in, trend chart and goal rings, backup prompts every 10 changes, expected growth %, notes on rows, Goals, one-column Plan, plan rows added or removed from a month onwards, auto-sum of picked values, collapsed empty rows and the compact liabilities total.
+Build tested: the files in this folder (offline cache version `my-finances-v6`), including "Cover with borrowing" for overspends (flagged in red), liability borrowing, month-start check-in, trend chart and goal rings, backup prompts every 10 changes, expected growth %, notes on rows, Goals, one-column Plan, plan rows added or removed from a month onwards, auto-sum of picked values, collapsed empty rows and the compact liabilities total.
 Environment: Chromium (the Claude desktop app's built-in browser) emulating a 375×812 iPhone screen, served from a local web server. Not a real iPhone; see "Not tested".
 
 ## Release decision
 
 | Release condition | Status |
 |---|---|
-| All financial calculation tests pass | **Met.** 106 of 106 automated engine tests pass on the final build. |
+| All financial calculation tests pass | **Met.** 113 of 113 automated engine tests pass on the final build. |
 | All data recovery tests pass | **Met.** 20 of 20 checks pass (persistence, corrupt storage, backup/restore, undo, confirmations). |
 | No known defects causing wrong balances, lost data or broken core workflows | **Met.** Two such defects were found during testing and fixed (below). None known now. |
 | Remaining minor issues documented | **Met.** See "Known minor issues". |
@@ -21,10 +21,11 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 1. **Formula saved on a Savings or Liabilities value could be silently lost** (data loss, serious). The app said "Formula saved", but nothing was stored, because validation restored a snapshot that replaced the data being written to. Fixed by restoring data in place and looking up the store again after validation. Retested: formulas on savings, liabilities, plan rows and repayments all save and recalculate.
 2. **Pressing Enter in an inline amount field didn't always save** (broken workflow). Fixed: Enter now saves straight away, and a later blur doesn't save a second time, so there's one undo step, not two. Retested along with Escape (cancel).
 3. **Unreadable saved data would have been overwritten on startup** (data-recovery risk). Fixed: the app now keeps a copy of the unreadable data, starts empty, and tells you to restore a backup. Retested by corrupting storage on purpose.
+4. **Overspend counted twice after editing a liability** (wrong balances). Opening a liability's ⋯ editor and saving put the overspend into "Borrowed" as well. Fixed: the borrowing field now shows only borrowing you typed. Retested: saving without changes leaves the balance and plan unchanged.
 
 ## What was tested and passed
 
-### Calculation engine: 106/106 pass (`tests/engine-tests.js`)
+### Calculation engine: 113/113 pass (`tests/engine-tests.js`)
 - **Savings forecast:** typed balance; recurring allocation; one-off £1,200 that applies only to its month and then returns to the recurring £700; actual amount replacing planned; editing a plan amount updates every later month.
 - **Worked example:** £1,200 November allocation, giving a Cash ISA forecast of £10,450 and a November total of £33,404.
 - **Currency:** ₹ balance kept as typed and converted at the editable rate; a rate change updates £ totals; a £ allocation into a ₹ account is converted; ₹ amounts typed inside formulas are rejected, so different currencies are never added together.
@@ -41,6 +42,7 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 - **Goals:** manual, formula, negative and blank lines added up; no target allowed; typed target; formula target; goals follow other tabs live; readable `[Goal: …]` references; one goal referencing another; goal loops caught; deleted goal reported; months until target date.
 - **Row lifetime:** a row added in a month is absent before it; a row removed from a month keeps earlier months, ignores old amounts afterwards, and its savings link stops too.
 - **Borrowing:** raises the liability balance; applies to one month only; counts as money in for the plan; a repayment can cover same-month borrowing; negative amounts ignored.
+- **Overspend cover:** a covered overspend balances the month, goes into the liability like other debt, adds to manual borrowing, stops being flagged once repaid, and creates a balance on a new liability in the first month.
 - **Growth %:** monthly growth on last month's balance before contributions; none on the typed current month; doesn't use ISA allowance.
 - **Auto-sum:** two references side by side are added; two plain numbers side by side are still an error.
 - **Formatting and input:** £ and ₹ (lakh grouping) formats; no "−£0"; amount parsing; a damaged backup repaired on load.
@@ -62,6 +64,9 @@ Environment: Chromium (the Claude desktop app's built-in browser) emulating a 37
 
 ### New features, clicked through: 30/30 pass
 Growth % and note saved, shown and explained; unrealistic growth (80%) rejected; borrowing via ⋯ raises the balance and shows in the Plan total and row text; notes on liabilities, plan rows and goals; goal progress ring (25%); trend chart on Overview; the backup prompt appears at 10 changes on every tab and clears after a backup; month-start check-in appears when a new month starts, is pre-filled with the forecast, saves real balances that later months forecast from, and can be skipped; Excel includes borrowing rows and growth formulas; CSV includes borrowing.
+
+### Overspend cover, clicked through: 18/18 pass
+Red "Over by" box with button; cover sheet pre-filled with the shortfall and your "Over spent" liability; the month then balances; a red note and tag in Plan; a red "Includes £X overspend" flag in Liabilities and on Overview; covering to a new liability adds it to the total; editing or reducing the overspend in ⋯; current-month cover can raise the typed balance; undo; Excel marks overspend.
 
 ### Real data check
 Your backup from 31 Oct 2026 loaded into the latest version (v5) with no calculation errors, identical totals for every month and no unexpected check-in prompt. In an earlier check it also loaded in any month and unchanged totals. On that data: empty rows collapsed; Rent removed from Jan 2027 onwards while Nov/Dec kept £1,100; a row added in Dec didn't appear in Nov; removing a row in its first month removed it completely; picking two values inserted `+` and summed to £430; the liabilities formula is hidden behind "ƒ Formula"; undo restored everything. 16/16 checks pass.

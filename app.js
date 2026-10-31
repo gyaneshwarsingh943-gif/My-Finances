@@ -388,7 +388,8 @@ function liabVal(id, m) {
     const cell = (S.liabCells[id] || {})[m];
     if (cell && cell.f) return evalIn(cell.f, m);
     if (cell && cell.v != null) return cell.v;
-    if (m === firstM()) return 0;
+    // First month with no typed balance: only this month's borrowing counts.
+    if (m === firstM()) return Math.max(0, borrowAmt(id, m) - repayUsed(id, m));
     return Math.max(0, liabVal(id, addM(m, -1)) + borrowAmt(id, m) - repayUsed(id, m));
   });
 }
@@ -429,9 +430,27 @@ function lineClosing(ln, m) {
 
 /* Repayments: every liability appears in the plan; switch it on or off per month. */
 // New borrowing on a liability in a month (e.g. spending on a card). Raises the balance and funds the plan.
+// `amt` is borrowing you entered; `over` is an overspend covered with borrowing (flagged in red).
 function borrowAmt(id, m) {
   const e = (S.borrow[id] || {})[m];
+  if (!e) return 0;
+  return (Number(e.amt) > 0 ? Number(e.amt) : 0) + (Number(e.over) > 0 ? Number(e.over) : 0);
+}
+function manualBorrow(id, m) {
+  const e = (S.borrow[id] || {})[m];
   return e && Number(e.amt) > 0 ? Number(e.amt) : 0;
+}
+function overAmt(id, m) {
+  const e = (S.borrow[id] || {})[m];
+  return e && Number(e.over) > 0 ? Number(e.over) : 0;
+}
+// Overspend still sitting in a liability's balance by month m (never more than the balance).
+function overInBalance(id, m) {
+  let tot = 0;
+  for (const k of monthRange(firstM(), m)) tot += overAmt(id, k);
+  if (!tot) return 0;
+  const bal = safe(() => liabVal(id, m));
+  return typeof bal === 'number' ? Math.min(tot, bal) : tot;
 }
 function repayOn(id, m) {
   const e = (S.repay[id] || {})[m];
@@ -467,8 +486,8 @@ function planSummary(m) {
       r[ln.sec] += lineUsed(ln, m);
       r['p' + ln.sec[0].toUpperCase() + ln.sec.slice(1)] += linePlanned(ln, m);
     }
-    r.borrow = 0;
-    for (const l of S.liabs) { r.repay += repayUsed(l.id, m); r.pRepay += repayPlanned(l.id, m); r.borrow += borrowAmt(l.id, m); }
+    r.borrow = 0; r.over = 0;
+    for (const l of S.liabs) { r.repay += repayUsed(l.id, m); r.pRepay += repayPlanned(l.id, m); r.borrow += borrowAmt(l.id, m); r.over += overAmt(l.id, m); }
     if (S.settings.carryLeft && m > firstM()) r.bf = Math.max(0, planSummary(addM(m, -1)).left);
     r.left = r.income + r.bf + r.borrow - r.expense - r.saving - r.repay;
     return r;
@@ -806,6 +825,7 @@ function screenOverview() {
       <section class="ov lia" aria-label="Liabilities">
         <span class="sub">Liabilities · now</span>
         <span class="big num">${lia instanceof FErr ? '⚠' : esc(fmt(lia))}</span>
+        ${(() => { const o = S.liabs.reduce((t, l) => t + overInBalance(l.id, cm), 0); return o > 0.005 ? `<span class="tag over" style="align-self:flex-start">Includes ${esc(fmt(o))} overspend</span>` : ''; })()}
         <div class="rule"></div><span class="cap" style="color:var(--muted)">FORECAST</span>${fl.html}${toggle}
         <button data-act="inspect" data-k="l">Breakdown</button>
       </section>
@@ -892,7 +912,7 @@ function liabSource(l, m) {
   if (m <= firstM()) return 'Not entered yet · tap to enter';
   const prev = safe(() => liabVal(l.id, addM(m, -1)));
   const b = borrowAmt(l.id, m);
-  if (b) { const r0 = safe(() => repayUsed(l.id, m)); return `ƒ Previous + borrowed ${fmt(b)}${typeof r0 === 'number' && r0 > 0 ? ' − repaid ' + fmt(r0) : ''}`; }
+  if (b) { const r0 = safe(() => repayUsed(l.id, m)); const o = overAmt(l.id, m); return `ƒ Previous + borrowed ${fmt(b)}${o ? ` (${fmt(o)} overspend)` : ''}${typeof r0 === 'number' && r0 > 0 ? ' − repaid ' + fmt(r0) : ''}`; }
   if (prev === 0) return 'Paid off';
   const r = safe(() => repayUsed(l.id, m));
   if (typeof r === 'number' && r > 0) return `ƒ Previous − repayment ${fmt(r)}`;
@@ -924,7 +944,7 @@ function screenLiab() {
         cls: typed || blankFirst ? 'manual' : 'calc', label: `${l.name}, ${mLong(m)}, balance in pounds` });
     return `<div class="row ${l.hidden ? 'hiddenrow' : ''}">
       <span class="dot" style="background:${esc(l.color)}"></span>
-      <span class="main"><span class="name ${l.bold ? 'b' : ''}">${esc(l.name)}</span><span class="meta">${esc(isErr ? r.message : liabSource(l, m))}</span>${l.note ? `<span class="meta rownote">${esc(l.note)}</span>` : ''}</span>
+      <span class="main"><span class="name ${l.bold ? 'b' : ''}">${esc(l.name)}</span>${(() => { const o = overInBalance(l.id, m); return o > 0.005 ? `<span class="tag over">Includes ${esc(fmt(o))} overspend</span>` : ''; })()}<span class="meta">${esc(isErr ? r.message : liabSource(l, m))}</span>${l.note ? `<span class="meta rownote">${esc(l.note)}</span>` : ''}</span>
       ${control}${moreBtn('editCell', { k: 'l', id: l.id, m }, l.name)}</div>`;
   }).join('');
   const rep = safe(() => S.liabs.reduce((t, l) => t + repayUsed(l.id, m), 0));
@@ -1003,6 +1023,7 @@ function screenPlan() {
 
   const repAll = S.liabs.filter((l) => !l.hidden);
   const repEmpty = (l) => { const u = safe(() => repayUsed(l.id, m)); return typeof u === 'number' && Math.abs(u) < 0.005 && !borrowAmt(l.id, m); };
+  // (rows with borrowing or an overspend are always shown)
   const repShown = ui.planShowEmpty.repay ? repAll : repAll.filter((l) => !repEmpty(l));
   const repHidden = repAll.length - repShown.length;
   const repRows = repShown.map((l) => {
@@ -1018,7 +1039,9 @@ function screenPlan() {
     else if (e && e.actual != null) sub = `Actual paid ${fmt(e.actual)} (used instead of plan)`;
     else if (on) { const after = safe(() => liabVal(l.id, m)); sub = m > firstM() ? `Paying · balance after ${after instanceof FErr ? '⚠' : fmt(after)}` : 'Paying this month'; }
     else sub = `Not paying in ${mShort(m)}`;
-    if (borrowed) sub = `Borrowed ${fmt(borrowed)} · ` + sub;
+    const overM = overAmt(l.id, m);
+    if (borrowed - overM > 0) sub = `Borrowed ${fmt(borrowed - overM)} · ` + sub;
+    const overTag = overM ? `<span class="tag over">Overspend ${esc(fmt(overM))} added</span>` : '';
     const ownAmt = e && e.amt != null && !e.f;
     const isF = (e && e.f) || ((findEntry(S.repay[l.id], m) || { e: {} }).e.f);
     let ctl;
@@ -1026,7 +1049,7 @@ function screenPlan() {
     else if (used instanceof FErr || raw instanceof FErr || isF) ctl = `<button class="v ${used instanceof FErr || raw instanceof FErr ? 'err' : 'calc'}" data-act="editRepay" data-id="${l.id}" data-m="${m}" aria-label="${esc(l.name)} repayment: formula. Open to edit">${esc(used instanceof FErr || raw instanceof FErr ? '⚠ Error' : 'ƒ ' + fmt(on ? used : raw))}</button>`;
     else ctl = inlineInput({ kind: 'repay', id: l.id, m, ccy: 'GBP', value: numStr(on ? safe(() => repayPlanned(l.id, m)) : raw), cls: !on ? 'off' : ownAmt ? 'manual' : 'calc', label: `${l.name}, ${mLong(m)}, repayment in pounds` });
     return `<div class="rrow">
-        <span style="flex:1 1 auto;display:flex;flex-direction:column;gap:3px;min-width:0"><span style="font-size:15px;font-weight:600">${esc(l.name)}</span><span class="small muted">${esc(sub)}</span></span>
+        <span style="flex:1 1 auto;display:flex;flex-direction:column;gap:3px;min-width:0"><span style="font-size:15px;font-weight:600">${esc(l.name)}</span>${overTag}<span class="small muted">${esc(sub)}</span></span>
         ${ctl}
         ${paidOff ? '' : `<button class="switch" role="switch" aria-checked="${on}" aria-label="Pay ${esc(l.name)} in ${esc(mLong(m))}" data-act="toggleRepay" data-id="${l.id}" data-m="${m}"></button>`}
         ${moreBtn('editRepay', { id: l.id, m }, l.name + ' repayment')}</div>`;
@@ -1040,6 +1063,8 @@ function screenPlan() {
       <div><span class="k">Allocated</span><span class="n num">${ps instanceof FErr ? '⚠' : esc(fmt(ps.expense + ps.saving + ps.repay))}</span></div>
       <div class="${leftCls}"><span class="k" style="color:inherit">${left != null && left < -0.005 ? 'Over by' : 'Left'}</span><span class="n num">${left == null ? '⚠' : esc(fmt(Math.abs(left) < 0.005 ? 0 : Math.abs(left)))}</span></div>
     </div>
+    ${left != null && left < -0.005 ? `<div class="overbox" role="alert"><span><b>Over by ${esc(fmt(-left))}</b> in ${esc(mLong(m))}. Cover it with borrowing so it’s tracked as a liability.</span><button data-act="openCover" data-m="${m}">Cover with borrowing</button></div>` : ''}
+    ${!(ps instanceof FErr) && ps.over ? `<div class="overnote"><span><b>${esc(fmt(ps.over))} overspend</b> covered by borrowing on ${esc(S.liabs.filter((l) => overAmt(l.id, m)).map((l) => l.name).join(', '))}. Change it with ⋯ on that liability below.</span></div>` : ''}
     ${secHTML}
     <section class="card sec"><div class="head"><div class="t"><h2>Liability repayments</h2><span class="num" style="font-weight:700">${ps instanceof FErr ? '⚠' : esc(fmt(ps.repay))}</span></div>
       <span class="small muted">Every liability is listed automatically. Switch on to pay it this month. Tap ⋯ to record new borrowing (e.g. spending on a card): it raises the balance and counts as money in.</span>
@@ -1420,7 +1445,8 @@ function sheetRepay(sh) {
     <button type="button" class="opt" data-act="seg" data-field-name="once" data-v="true" aria-pressed="${once === 'true'}"><b>One-off</b><span>This month only</span></button>
     <button type="button" class="opt" data-act="seg" data-field-name="once" data-v="false" aria-pressed="${once !== 'true'}"><b>Recurring</b><span>This month and after, until changed</span></button>
     <span class="cap2">NEW BORROWING</span>
-    <div class="field"><label for="borIn">Borrowed on ${esc(l.name)} in ${esc(mLong(sh.m))} (£)</label><input id="borIn" data-field="borrow" inputmode="decimal" value="${esc(fv('borrow', borrowAmt(sh.id, sh.m) ? String(borrowAmt(sh.id, sh.m)) : ''))}" placeholder="0"><span class="hint">Adds to the balance this month and counts as money in for the plan, so spending it doesn’t show as overspent. This month only.</span></div>
+    <div class="field"><label for="borIn">Borrowed on ${esc(l.name)} in ${esc(mLong(sh.m))} (£)</label><input id="borIn" data-field="borrow" inputmode="decimal" value="${esc(fv('borrow', manualBorrow(sh.id, sh.m) ? String(manualBorrow(sh.id, sh.m)) : ''))}" placeholder="0"><span class="hint">Adds to the balance this month and counts as money in for the plan, so spending it doesn’t show as overspent. This month only.</span></div>
+    <div class="field"><label for="overIn" style="color:var(--err-ink)">Overspend covered by borrowing (£)</label><input id="overIn" data-field="over" inputmode="decimal" value="${esc(fv('over', overAmt(sh.id, sh.m) ? String(overAmt(sh.id, sh.m)) : ''))}" placeholder="0"><span class="hint">Set by “Cover with borrowing” in Plan. Shown in red. Clear it to remove.</span></div>
     <div class="field"><label for="actIn">Actual paid (optional)</label><input id="actIn" data-field="actual" inputmode="decimal" value="${esc(fv('actual', e.actual != null ? String(e.actual) : ''))}" placeholder="Not yet"></div>
     <p class="note">Last updated: ${esc(e.at ? stamp(e.at) : 'never')}</p>
     <button class="btn primary wide" data-act="saveRepay">Save</button>
@@ -1469,6 +1495,23 @@ function sheetLiab(sh) {
     ${used.length ? `<div class="box info">Used in: ${esc(used.join('; '))}</div>` : ''}
     <button class="btn primary wide" data-act="saveLiab">${isNew ? 'Add liability' : 'Save'}</button>
     ${!isNew ? '<button class="btn danger wide" data-act="deleteLiab">Delete liability</button>' : ''}`;
+}
+function sheetCover(sh) {
+  const m = sh.m;
+  const ps = safe(() => planSummary(m));
+  const short = ps instanceof FErr ? 0 : Math.max(0, -ps.left);
+  const def = (S.liabs.find((l) => /over/i.test(l.name)) || S.liabs[0] || { id: '__new' }).id;
+  const target = fv('target', def);
+  const tl = liabById(target);
+  const cell = tl ? (S.liabCells[tl.id] || {})[m] : null;
+  const typedNow = m === firstM() && cell && cell.v != null && !cell.f;
+  return `${phead(`Plan › ${mLong(m)}`, 'Cover overspend with borrowing')}
+    <div class="box bad">This month is over by <b>${esc(fmt(short))}</b>. Covering it adds that amount to a liability, so it shows in Liabilities and its forecast like any other debt, flagged in red.</div>
+    <div class="field"><label for="covAmt">Amount to cover (£)</label><input id="covAmt" data-field="amt" inputmode="decimal" value="${esc(fv('amt', short ? String(Math.round(short * 100) / 100) : ''))}"></div>
+    <div class="field"><label for="covTo">Add it to</label><select id="covTo" data-field="target">${S.liabs.map((l) => `<option value="${l.id}" ${l.id === target ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}<option value="__new" ${target === '__new' ? 'selected' : ''}>New liability…</option></select></div>
+    ${target === '__new' ? `<div class="field"><label for="covName">Name of new liability</label><input id="covName" data-field="name" value="${esc(fv('name', 'Overspend'))}" maxlength="60"></div>` : ''}
+    ${typedNow ? sw('addBal', fv('addBal', true), `Also add to ${esc(tl.name)}’s current balance`, `You typed ${fmt(cell.v)} for ${mLong(m)}. Leave on unless that already includes this overspend.`) : ''}
+    <button class="btn primary wide" data-act="saveCover" style="background:var(--err-ink);border-color:var(--err-ink);color:var(--card)">Cover with borrowing</button>`;
 }
 function sheetCheckIn() {
   const m = curM();
@@ -1611,7 +1654,7 @@ function renderSheet() {
   const sh = ui.sheet;
   if (!sh) { host.innerHTML = ''; document.body.style.overflow = ''; return; }
   const scrollTop = $('#sheet .panel') ? $('#sheet .panel').scrollTop : 0;
-  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow, checkin: sheetCheckIn };
+  const builders = { cell: sheetCell, total: sheetTotal, line: sheetLine, repay: sheetRepay, cat: sheetCat, liab: sheetLiab, months: sheetMonths, rate: sheetRate, allowance: sheetAllowance, isaMonth: sheetIsaMonth, inspect: sheetInspect, settings: sheetSettings, goal: sheetGoal, grow: sheetGoalRow, checkin: sheetCheckIn, cover: sheetCover };
   resetCalc();
   host.innerHTML = `<div class="shade" data-act="shade"><div class="panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">${builders[sh.type](sh)}</div></div>`;
   document.body.style.overflow = 'hidden';
@@ -1891,6 +1934,39 @@ const ACT = {
     closeSheet();
   },
 
+  /* overspend */
+  openCover: (d) => openSheet({ type: 'cover', m: d.m }),
+  saveCover: guard(() => {
+    collect();
+    const sh = ui.sheet;
+    const m = sh.m;
+    const amt = readNum('amt', { allowBlank: false, min: 0 });
+    if (!(amt > 0)) throw new FErr('Enter an amount above £0');
+    const def = (S.liabs.find((l) => /over/i.test(l.name)) || S.liabs[0] || { id: '__new' }).id;
+    const target = fv('target', def);
+    const name = target === '__new' ? uniqueName(S.liabs, fv('name', 'Overspend')) : null;
+    const tl = liabById(target);
+    const cell = tl ? (S.liabCells[tl.id] || {})[m] : null;
+    const addBal = m === firstM() && cell && cell.v != null && !cell.f && !!fv('addBal', true);
+    let label = '';
+    mutate(() => {
+      let id = target;
+      if (target === '__new') {
+        id = uid();
+        S.liabs.push({ id, name, repay: 0, autoPay: true, color: '#8E3B2F', hidden: false, bold: false, at: now() });
+        S.liabTotal.f = addRefToSum(S.liabTotal.f, `{l:${id}}`);
+      }
+      S.borrow[id] = S.borrow[id] || {};
+      const e = Object.assign({ amt: 0, over: 0 }, S.borrow[id][m] || {});
+      e.over = Math.round(((Number(e.over) || 0) + amt) * 100) / 100; e.at = now();
+      S.borrow[id][m] = e;
+      if (addBal) { const c = S.liabCells[id][m]; c.v = Math.round((c.v + amt) * 100) / 100; c.at = now(); }
+      label = (liabById(id) || {}).name;
+    });
+    toast(`${fmt(amt)} added to ${label} as overspend`);
+    closeSheet();
+  }),
+
   /* month-start check-in */
   openCheckIn: () => openSheet({ type: 'checkin', m: curM() }),
   saveCheckIn: guard(() => {
@@ -2014,6 +2090,7 @@ const ACT = {
     const actual = readNum('actual', { min: 0 });
     const on = !!fv('on', repayOn(sh.id, sh.m));
     const borrow = readNum('borrow', { min: 0 });
+    const over = readNum('over', { min: 0 });
     let amt = null, f = null;
     if (mode === 'value') amt = readNum('amt', { min: 0 });
     else { const text = String(fv('fx', '')).trim(); if (text) f = validateFormula(sh, text); }
@@ -2024,7 +2101,7 @@ const ACT = {
       if (on !== !!l.autoPay) e.on = on; else if (e0.on != null) e.on = on;
       S.repay[sh.id][sh.m] = e;
       S.borrow[sh.id] = S.borrow[sh.id] || {};
-      if (borrow) S.borrow[sh.id][sh.m] = { amt: borrow, at: now() }; else delete S.borrow[sh.id][sh.m];
+      if (borrow || over) S.borrow[sh.id][sh.m] = { amt: borrow || 0, over: over || 0, at: now() }; else delete S.borrow[sh.id][sh.m];
     }, 'Saved');
     closeSheet();
   }),
@@ -2327,7 +2404,7 @@ function buildWorkbookModel() {
       if (e && e.actual != null) put(ps, row, 4, { n: e.actual });
       put(ps, row, 5, cellFor(() => repayUsed(l.id, m), `IF(D${row}="",C${row},D${row})`));
       const br = brRow[l.id];
-      put(ps, br, 1, { s: 'Borrowed: ' + l.name }); put(ps, br, 2, { s: 'New borrowing (adds to liability)' });
+      put(ps, br, 1, { s: 'Borrowed: ' + l.name }); put(ps, br, 2, { s: overAmt(l.id, m) ? `New borrowing incl. ${fmt(overAmt(l.id, m))} OVERSPEND` : 'New borrowing (adds to liability)' });
       put(ps, br, 5, { n: borrowAmt(l.id, m) });
     });
     const sumOf = (rows) => (rows.length ? `SUM(${rows.map((x) => 'E' + x).join(',')})` : '0');
